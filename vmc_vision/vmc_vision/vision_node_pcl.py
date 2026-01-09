@@ -11,20 +11,32 @@ from sensor_msgs_py import point_cloud2 as pc2
 from std_msgs.msg import Header
 
 class DepthVisionNode(Node):
+    
+    """
+    Initializes a ROS2 node that processes depth images to generate a PointCloud2 message.
+    """
     def __init__(self):
+        
         super().__init__('vision_pcl')
+        
+        self.bridge = CvBridge()        # OpenCV Bridge for image conversion
 
-        # --- CONFIGURATION ---
-        self.min_dist = 0.07  # 7 cm
-        self.max_dist = 0.60  # 60 cm
-        self.depth_scale = 0.001 # RealSense default (mm -> m)
-        self.decimation = 15  # Salta pixel per alleggerire il carico (1=tutti, 4=uno ogni 4)
-
-        # --- ROS SETUP ---
-        self.bridge = CvBridge()
+        # ==========================
+        # --- CAMERA CONFIGURATION ---
+        # ==========================
+        
+        self.min_dist = 0.07            # Minimum distance to consider for detected obstacles (minimum distance Realsense)
+        self.max_dist = 0.60            # Maximum distance to consider for detected obstacles (maximum distances Realsense)
+        self.depth_scale = 0.001        # RealSense default (mm -> m)
+        self.decimation = 20            # Skip factor for trivially downsampling the depth image
         self.camera_info = None
 
-        # Subscribers
+        # ==========================
+        # --- COMMUNICATION TOPICS ---
+        # ==========================
+        
+        # -- Subscribers --
+        
         self.sub_info = self.create_subscription(
             CameraInfo, 
             'camera/camera/aligned_depth_to_color/camera_info', 
@@ -39,62 +51,73 @@ class DepthVisionNode(Node):
             10
         )
         
-        # Publisher PointCloud
+        # -- Publisher --
+        
         self.pub_pcl = self.create_publisher(PointCloud2, '/vision/obstacle_cloud', 10)
 
+        # Logging
         self.get_logger().info(f"Depth Node Ready! Range: {self.min_dist}-{self.max_dist}m")
 
+
+    """
+    Callback for CameraInfo messages to store intrinsic parameters.
+    """
     def cb_info(self, msg):
         if self.camera_info is None:
             self.camera_info = msg
             self.get_logger().info("Camera Info Acquired!")
 
+
+    """
+    Callback for depth image messages to process and publish PointCloud2.
+    """
     def cb_depth(self, msg):
+        
         if self.camera_info is None:
             return
 
-        # 1. Conversione to OpenCV format
+        # Convert depth image from the camera to OpenCV format for processing
         depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="16UC1")
         
-        # 2. Downsampling 
+        # Downsampling (take a pixel every n pixel)
         if self.decimation > 1:
             depth_image = depth_image[::self.decimation, ::self.decimation]
 
-        # Convert in meters (mm to m)
+        # Obtain depth values in meters to create point cloud filtered by distance
         z_vals = depth_image.astype(np.float32) * self.depth_scale
 
-        # 3. Validity Mask (Range 7cm - 60cm)
+        # Validity Mask (Range 7cm - 60cm)
         mask = (z_vals > self.min_dist) & (z_vals < self.max_dist)
         
-        # Se non ci sono punti validi, esci
+        # Without valid points, skip processing
         if not np.any(mask):
             return
 
-        # 4. Reprojection 3D 
+        # Reprojection 3D using Pinhole Camera Model 
         fx = self.camera_info.k[0] / self.decimation
         fy = self.camera_info.k[4] / self.decimation
         cx = self.camera_info.k[2] / self.decimation
         cy = self.camera_info.k[5] / self.decimation
 
-        # Pixels coordinates
+        # Pixels coordinates of valid points to reproject
         v_idx, u_idx = np.where(mask)
         
-        # Take z info from image
+        # Take z info from image using the valid mask
         z_valid = z_vals[v_idx, u_idx]
 
         # Formulas Pinhole Camera Model
         x_valid = (u_idx - cx) * z_valid / fx
         y_valid = (v_idx - cy) * z_valid / fy
 
-        # 5. PointCloud2 Creation
+        # PointCloud2 Creation from valid points
         points_3d = np.vstack((x_valid, y_valid, z_valid)).T
 
-        # Header
+        # Header for PointCloud2
         header = Header()
         header.stamp = msg.header.stamp
         header.frame_id = msg.header.frame_id 
 
-        # Create the pointcloud from what we got
+        # Create the message of PointCloud2
         pcl_msg = pc2.create_cloud_xyz32(header, points_3d)
         
         # Publish the cleaned pointcloud
