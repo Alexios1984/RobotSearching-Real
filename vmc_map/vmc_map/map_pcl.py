@@ -55,16 +55,16 @@ class MapLogicNode(Node):
 
         self.TARGET_VOXEL_SIZE = 0.03              # Voxel size in meters
         
-        # Calculate number of voxels in each dimension
-        self.N_VOXELS_X = int(np.ceil(self.dim_x / self.TARGET_VOXEL_SIZE))
-        self.N_VOXELS_Y = int(np.ceil(self.dim_y / self.TARGET_VOXEL_SIZE))
-        self.N_VOXELS_Z = int(np.ceil(self.dim_z / self.TARGET_VOXEL_SIZE))
-        
         # Dimensions of the workspace
         self.dim_x = self.WS_BOUNDS['x'][1] - self.WS_BOUNDS['x'][0]
         self.dim_y = self.WS_BOUNDS['y'][1] - self.WS_BOUNDS['y'][0]
         self.dim_z = self.WS_BOUNDS['z'][1] - self.WS_BOUNDS['z'][0]
 
+        # Calculate number of voxels in each dimension
+        self.N_VOXELS_X = int(np.ceil(self.dim_x / self.TARGET_VOXEL_SIZE))
+        self.N_VOXELS_Y = int(np.ceil(self.dim_y / self.TARGET_VOXEL_SIZE))
+        self.N_VOXELS_Z = int(np.ceil(self.dim_z / self.TARGET_VOXEL_SIZE))
+    
         # Voxels' dimensions
         self.res_x = self.dim_x / self.N_VOXELS_X
         self.res_y = self.dim_y / self.N_VOXELS_Y
@@ -180,7 +180,7 @@ class MapLogicNode(Node):
         # ============================
 
         self.pub_target = self.create_publisher(                    # Target voxel and set of obstacles
-            VmcControlTarget, '/vmc/target&obstacles', 10)
+            VmcControlTarget, '/vmc/target_obstacles', 10)
 
         self.pub_debug_pcl = self.create_publisher(                 # Pointcloud filtered (within the workspace)
             PointCloud2, '/vmc/debug_obstacles', 10)
