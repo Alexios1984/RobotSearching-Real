@@ -354,6 +354,9 @@ function ros_vm_controller(
             rethrow(e)
         end
         
+        # Initialize the arguments for the f_setup 
+        local target_id, rep_ids, cam_frame_id, link_coords_ids
+
         # Unpack args explicitly to check structure
         println("DEBUG [5]: Unpacking args...")
         try
