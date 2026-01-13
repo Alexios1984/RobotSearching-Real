@@ -8,16 +8,23 @@ from launch.substitutions import PathJoinSubstitution
 
 def generate_launch_description():
 
-    # Percorso al pacchetto vmc_startup
+    # Path to the folder
     startup_pkg_share = FindPackageShare('vmc_startup')
 
-    # --- 0. RVIZ CONFIGURATION ---
-    # Costruiamo il percorso al file .rviz che hai salvato
-    rviz_config_file = PathJoinSubstitution(
-        [startup_pkg_share, 'config', 'rviz2_config.rviz']
+    # --- 0. Franka Controller ---
+
+    franka_cmd = ExecuteProcess(
+        cmd=[
+            'ros2', 'launch', 'franka_bringup', 'example.launch.py',
+            'controller_name:=julia_torque_controller'
+        ],
+        output='screen',
+        respawn_delay=4.0 
     )
 
-    # --- 1. REALSENSE CAMERA ---
+
+    # --- 1. Realsense Camera ---
+
     realsense_cmd = ExecuteProcess(
         cmd=[
             'ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
@@ -28,32 +35,41 @@ def generate_launch_description():
         output='screen',
     )
 
-    # --- 3. VISION NODE ---
+
+    # --- 2. Vision Node ---
     vision_node = Node(
         package='vmc_vision',
         executable='vision_pcl',
         output='screen'
     )
 
-    # --- 4. MAP NODE (IL CERVELLO) ---
+
+    # --- 3. Map Node ---
     map_node = Node(
         package='vmc_map',
         executable='map_pcl',
         output='screen'
     )
 
-    # --- 5. RVIZ NODE ---
+
+    # --- 4. Rviz Node ---
+    
+    # Use the saved default configuration file 
+    rviz_config_file = PathJoinSubstitution(
+        [startup_pkg_share, 'config', 'rviz2_config.rviz']
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', rviz_config_file], # Carica la tua config
+        arguments=['-d', rviz_config_file], 
         output='screen'
     )
 
-    # --- GESTIONE TEMPISTICA ---
+
+    # --- Timing Launch ---
     
-    # RViz parte subito (o con leggero ritardo se preferisci)
     delayed_rviz = TimerAction(
         period=1.0,
         actions=[rviz_node]
@@ -71,7 +87,10 @@ def generate_launch_description():
 
     return LaunchDescription([
         realsense_cmd,
-        delayed_rviz,   # Aggiunto alla lista
+        delayed_rviz,   
         delayed_vision,
         delayed_map
     ])
+    
+    
+    
