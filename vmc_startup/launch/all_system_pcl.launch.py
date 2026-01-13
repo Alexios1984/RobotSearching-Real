@@ -86,6 +86,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        franka_cmd,
         realsense_cmd,
         delayed_rviz,   
         delayed_vision,
