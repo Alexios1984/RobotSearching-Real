@@ -210,7 +210,6 @@ function f_setup(cache)
     link_coords_ids = []
 
     for name in link_names
-        # Nota: ".robot." è il prefisso standard se hai caricato il robot con quel nome
         try
             cid = get_compiled_coordID(cache, ".robot.$(name)_pos")
             push!(link_coords_ids, cid)
