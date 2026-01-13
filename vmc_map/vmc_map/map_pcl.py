@@ -127,6 +127,7 @@ class MapLogicNode(Node):
 
         self.cb_group = ReentrantCallbackGroup()        # Lock for the group where all can access at the same time (for parallelization). The default group is the MutuallyExsclusiveCallbackGroup that means that just one per time can be executed
 
+        self.min_distance_rep = 0.10                    # Minimum distance between repulsors 
         
         # --- Deadlock Configuration ---
         
@@ -289,7 +290,7 @@ class MapLogicNode(Node):
 
         # --- 4. Tranformation Points in World Frame ---
         
-        # Transform (considering generalized vectors) and take just the vector of 3 coordinates
+        # Transform (considering homogeneous vectors) and take just the vector of 3 coordinates
         ones = np.ones((points_cam.shape[0], 1))
         points_cam_h = np.hstack([points_cam, ones])
         
@@ -368,7 +369,7 @@ class MapLogicNode(Node):
         step = 1                                # Take a point each 'step' points  
         final_points = valid_points[::step]     # Downsalmpled set of points
         
-        # Update repulsors' list
+        # Update repulsors' list ############################################################################################################################################################################################################################
         self.current_visible_obstacles = final_points 
 
 
@@ -478,27 +479,24 @@ class MapLogicNode(Node):
         return indices
 
     """
-    Versione "Full Grid & Sync": 
-    1. Usa la matrice T_world_cam SINCRONIZZATA passata come argomento.
-    2. Non usa subgrid (lavora su tutto il workspace).
-    3. Usa la logica probabilistica (Secchi d'acqua).
+    Uses the analogy to the water buckets to update the empty space in the grid.
+    Do not iterate over all the voxels in the grid, skip the voxels where the water in it 
+    is zero, this means that they are more likely to be surely empty and then there's no 
+    need to check there.
     """
     def update_free_space_in_fov(self, T_world_cam):
                 
-        # --- 1. SELEZIONE CANDIDATI (Ottimizzazione) ---
-        # Invece di controllare 8000 voxel geometricamente, controlliamo PRIMA
-        # chi ha bisogno di essere aggiornato. Se un voxel è già al minimo (0), è inutile sottrarre valore. 
-        # Risparmiamo calcoli escludendo i voxel già vuoti.
-
-        # Cerchiamo indici dove il valore è > VAL_MIN (0)
-        # Questo sostituisce il vecchio "argwhere != 1" e rimuove la necessità della subgrid.
+        # --- 1. Candidates Selection (Optimization) ---
+        
+        # Check the voxels that are surely empty or full
         indices_to_check = np.argwhere((self.grid > self.VAL_MIN) & (self.grid < self.VAL_LOCK))
 
         if len(indices_to_check) == 0:
             return
 
-        # --- 2. CALCOLO COORDINATE WORLD ---
-        # Vettorizzazione pura: calcoliamo le posizioni nel mondo di tutti i candidati
+
+        # --- 2. Compute World Coordinates ---
+        
         ix = indices_to_check[:, 0]
         iy = indices_to_check[:, 1]
         iz = indices_to_check[:, 2]
@@ -507,55 +505,62 @@ class MapLogicNode(Node):
         pts_y = self.WS_BOUNDS['y'][0] + (iy + 0.5) * self.res_y
         pts_z = self.WS_BOUNDS['z'][0] + (iz + 0.5) * self.res_z
 
-        # Creiamo matrice (N, 4) per la moltiplicazione omogenea
+        # Create matrix (N, 4) for homogeneous product
         pts_world = np.column_stack((pts_x, pts_y, pts_z, np.ones_like(pts_x)))
 
-        # --- 3. PROIEZIONE NEL CAMERA FRAME (SYNC FIX) ---
-        # Qui sta la correzione fondamentale: Usiamo T_world_cam passata come argomento!
-        # Non tocchiamo self.latest_cam_pose.
+
+        # --- 3. Projection to Camera Frame ---
+        
+        # Take the transformation matrix from the input arguments
         T_cam_world = np.linalg.inv(T_world_cam)
         
-        # Moltiplicazione: Trasformiamo i punti dal Mondo alla Camera
-        pts_cam = (T_cam_world @ pts_world.T).T # Risultato (N, 4)
-
+        # Position in camera frame
+        pts_cam = (T_cam_world @ pts_world.T).T 
         x_c = pts_cam[:, 0]
         y_c = pts_cam[:, 1]
         z_c = pts_cam[:, 2]
 
-        # --- 4. GEOMETRIA FRUSTUM (Idrante) ---
+
+        # --- 4. Frustum Geometry ---
+        
+        # Values for the frustum
         tan_h = np.tan(self.FOV_H / 2.0)
         tan_v = np.tan(self.FOV_V / 2.0)
 
-        # Maschera Geometrica
-        # z > 0.05: Near clip (non pulire i primi 5cm per sicurezza braccio)
-        # z < MAX_DEPTH: Fino a dove arriva l'idrante
+        # Geometric Mask (in distance range and FOV range)
         mask_fov = (z_c > 0.05) & (z_c < self.MAX_DEPTH) & \
                    (np.abs(x_c) < (z_c * tan_h)) & \
                    (np.abs(y_c) < (z_c * tan_v))
 
-        # --- 5. APPLICAZIONE DECAY (Secchi d'Acqua) ---
-        # Filtriamo gli indici originali usando la maschera geometrica
+
+        # --- 5. Water Bucket Analogy Application ---
+        
+        # Filter the indexes with the mask
         valid_indices = indices_to_check[mask_fov]
 
         if len(valid_indices) > 0:
-            # Estraiamo le coordinate grid dei voxel colpiti
+            
+            # Take single valid indexes coordinates
             v_ix = valid_indices[:, 0]
             v_iy = valid_indices[:, 1]
             v_iz = valid_indices[:, 2]
 
-            # Lettura valore attuale
+            # Take current water values for each voxel
             current_vals = self.grid[v_ix, v_iy, v_iz]
 
-            # Sottrazione (Evaporazione fiducia)
+            # Subtraction: make water evaporate if voxel is seen empty
             new_vals = current_vals - self.MISS_DEC
 
-            # Clamp a VAL_MIN (0) e Scrittura
+            # Clamp to VAL_MIN (0)
             self.grid[v_ix, v_iy, v_iz] = np.clip(new_vals, self.VAL_MIN, self.VAL_MAX)
             
-            # Opzionale: Debug
-            # self.get_logger().info(f"🧹 Pulizia Sync: {len(valid_indices)} voxel aggiornati.")
 
+    """
+    Publish the voxel grid.
+    """
     def publish_voxel_grid(self):
+        
+        # Marker Setup
         marker = Marker()
         marker.header.frame_id = "fr3_link0" 
         marker.header.stamp = self.get_clock().now().to_msg()
@@ -564,41 +569,34 @@ class MapLogicNode(Node):
         marker.type = Marker.CUBE_LIST
         marker.action = Marker.ADD
         
-        # Scale dei voxel
-        # Nota: Li facciamo leggermente più piccoli per vedere "attraverso"
+        # Voxel Scale
         marker.scale = Vector3(x=self.res_x, y=self.res_y, z=self.res_z)
         
-        # --- DEFINIZIONE COLORI ---
-        # Free: Verde/Ciano, molto trasparente (Alpha basso)
-        c_free = ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.2) 
         
-        # Occupied: Rosso pieno, opaco
+        # --- Colors Definition ---
+        
+        # Free: Green
+        c_free = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.2) 
+        
+        # Occupied: Red
         c_occupied = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.9) 
         
-        # Target: Giallo
+        # Target: Yellow
         c_target   = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
 
-        # --- 1. FREE SPACE (Il trucco della "Nebbia") ---
-        # Invece di Unknown, mostriamo dove abbiamo già guardato!
+
+        # --- 1. Free Space---
+        
+        # Free: 0 < Water Level < VAL_MIN
         idx_free = np.argwhere((self.grid < self.VAL_FREE) & (self.grid > 0))
         
-        # DOWNSAMPLING AGGRESSIVO:
-        # Ne prendiamo solo 1 ogni 8 (o 10). 
-        # Questo riduce il carico dell'80-90% ma ti fa vedere comunque il volume.
-        # step_free = 8 
-        # if len(idx_free) > 0:
-        #     idx_free_viz = idx_free[::step_free] 
             
-        #     for ix, iy, iz in idx_free_viz:
-        #         p = self.grid_to_world(ix, iy, iz)
-        #         marker.points.append(Point(x=p[0], y=p[1], z=p[2]))
-        #         marker.colors.append(c_free)
-            
-        # --- 2. OCCUPIED (Rosso) ---
-        # Questi sono pericoli, li vogliamo vedere bene.
+        # --- 2. Occupied Space ---
+        
+        # Occupied: VAL_OCCUPIED < Water Level
         idx_occupied = np.argwhere(self.grid > self.VAL_OCCUPIED)
         
-        # Downsampling leggero solo se sono troppi (es. un muro enorme)
+        # Downsampling (if there are too many voxels to check)
         step_occ = 1
         if len(idx_occupied) > 5000:
              step_occ = 2
@@ -610,36 +608,44 @@ class MapLogicNode(Node):
             marker.points.append(Point(x=p[0], y=p[1], z=p[2]))
             marker.colors.append(c_occupied)
 
-        # --- 3. TARGET (GIALLO) ---
+
+        # --- 3. Target ---
+        
         if self.current_target_idx is not None:
+            
+            # Take target indexes
             t_ix, t_iy, t_iz = self.current_target_idx
+            
+            # Take target coordinates
             p_target = self.grid_to_world(t_ix, t_iy, t_iz)
             
-            # Target lo facciamo un po' più grosso magari (sovrascrivendo scale se fosse un marker diverso, 
-            # ma qui è una list, quindi si becca la scale globale. Va bene uguale).
+            # Update the target voxel color
             marker.points.append(Point(x=p_target[0], y=p_target[1], z=p_target[2]))
             marker.colors.append(c_target)
             
         self.pub_viz.publish(marker)
 
+
+    """
+    Publish the Exploration Satus Text.
+    Computes the percentage of explored voxels (Free + Occupied) and publish a 3D text.
+    """
     def publish_exploration_status(self):
-        """
-        Calcola la % di voxel esplorati (Free + Occupied) e pubblica un testo 3D.
-        """
-        # 1. Calcolo Statistiche
-        total_voxels = self.N_VOXELS_X * self.N_VOXELS_Y * self.N_VOXELS_Z
+     
+        # --- 1. Compute Statistics ---
         
-        # Conta tutto ciò che NON è 0 (Unknown). 
-        # Quindi conta sia 1 (Free) che 2 (Occupied).
-        mask_explored = (self.grid < self.VAL_FREE) | (self.grid > self.VAL_OCCUPIED)
+        total_voxels = self.N_VOXELS_X * self.N_VOXELS_Y * self.N_VOXELS_Z                  # Total number of voxels
         
-        # Contiamo quanti 'True' ci sono nella maschera
-        explored_count = np.count_nonzero(mask_explored)
+        mask_explored = (self.grid < self.VAL_FREE) | (self.grid > self.VAL_OCCUPIED)       # Set to 1 for each non-empty voxel
         
-        # Calcolo percentuale
+        explored_count = np.count_nonzero(mask_explored)                                    # Total number of non-empty voxels
+        
+        # Percentage Computation
         percentage = (explored_count / total_voxels) * 100.0
 
-        # 2. Creazione Marker Testo
+
+        # --- 2. Creation Text Marker ---
+        
         marker = Marker()
         marker.header.frame_id = "fr3_link0"
         marker.header.stamp = self.get_clock().now().to_msg()
@@ -652,10 +658,8 @@ class MapLogicNode(Node):
         y_center = (self.WS_BOUNDS['y'][0] + self.WS_BOUNDS['y'][1]) / 2.0
         z_min = self.WS_BOUNDS['z'][0]
 
-        # Lo spostiamo leggermente più avanti (+0.05 su X) per non compenetrare il wireframe
         marker.pose.position.x = x_max + 0.1
         marker.pose.position.y = y_center
-        # Lo mettiamo 10cm sopra il tetto del box per leggibilità
         marker.pose.position.z = z_min 
         
         marker.pose.orientation.w = 1.0
@@ -667,10 +671,12 @@ class MapLogicNode(Node):
 
         self.pub_status_text.publish(marker)
 
+
+    """
+    Publish the workspace boundaries as lines.
+    """
     def publish_workspace_boundary(self):
-        """
-        Disegna un 'cubo' (wireframe) che rappresenta i limiti del workspace.
-        """
+
         marker = Marker()
         marker.header.frame_id = "fr3_link0"
         marker.header.stamp = self.get_clock().now().to_msg()
@@ -679,18 +685,17 @@ class MapLogicNode(Node):
         marker.type = Marker.LINE_LIST
         marker.action = Marker.ADD
         
-        # Spessore della linea (1cm va bene)
-        marker.scale.x = 0.005 
         
-        # Colore: Bianco Semitrasparente (elegante e non intrusivo)
-        marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.4)
+        marker.scale.x = 0.005                                      # Line Width
+        
+        marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.4)        # Color
 
-        # Coordinate dei limiti
+        # Coordinates Limits
         x_min, x_max = self.WS_BOUNDS['x']
         y_min, y_max = self.WS_BOUNDS['y']
         z_min, z_max = self.WS_BOUNDS['z']
 
-        # Gli 8 vertici del box
+        # Box Vertices
         p0 = Point(x=x_min, y=y_min, z=z_min)
         p1 = Point(x=x_max, y=y_min, z=z_min)
         p2 = Point(x=x_max, y=y_max, z=z_min)
@@ -701,13 +706,13 @@ class MapLogicNode(Node):
         p6 = Point(x=x_max, y=y_max, z=z_max)
         p7 = Point(x=x_min, y=y_max, z=z_max)
 
-        # Definiamo le 12 linee (ogni coppia è un segmento)
+        # Define the 12 lines
         lines = [
-            # Base (Z min)
+            # Base 
             p0, p1,  p1, p2,  p2, p3,  p3, p0,
-            # Tetto (Z max)
+            # Roof
             p4, p5,  p5, p6,  p6, p7,  p7, p4,
-            # Colonne verticali
+            # Vertical Columns
             p0, p4,  p1, p5,  p2, p6,  p3, p7
         ]
         
@@ -716,7 +721,7 @@ class MapLogicNode(Node):
 
 
     """ 
-    Disegna la piramide orientata correttamente nel world frame 
+    Draw the frustum attached to the camera and moving with it.
     """
     def publish_frustum(self):
         
@@ -730,19 +735,19 @@ class MapLogicNode(Node):
         marker.scale = Vector3(x=0.005, y=0.0, z=0.0)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.8) # Cyan
 
-        # Setup Trasformazione
+        # Setup Trasformation Matrix
         r_cam = R.from_quat(self.latest_cam_pose['quat'])
         t_cam = self.latest_cam_pose['pos']
-        R_wc = r_cam.as_matrix() # Matrice di rotazione (3x3)
+        R_wc = r_cam.as_matrix() 
         
-        # Geometria (Z è la profondità ottica)
-        z = self.MAX_DEPTH # 50 cm
+        # Geometry of the Frustum
+        z = self.MAX_DEPTH 
         tan_h = np.tan(self.FOV_H / 2.0)
         tan_v = np.tan(self.FOV_V / 2.0)
         x = z * tan_h
         y = z * tan_v
         
-        # Punti nel FRAME CAMERA (Optical: Z-forward)
+        # Points in Camera Frame
         p_c_origin = np.array([0, 0, 0])
         p_c_tl = np.array([-x, -y, z]) 
         p_c_tr = np.array([ x, -y, z]) 
@@ -751,11 +756,10 @@ class MapLogicNode(Node):
         
         corners_cam = [p_c_origin, p_c_tl, p_c_tr, p_c_br, p_c_bl]
         
-        # TRASFORMAZIONE MANUALE: P_world = R * P_cam + T
-        # Se questo passaggio è fatto bene, la piramide DEVE ruotare.
+        # Trasformation
         pts_w = []
         for p in corners_cam:
-            # Rotazione + Traslazione
+            # Rotation + Traslation
             p_rot = R_wc @ p 
             p_final = p_rot + t_cam
             pts_w.append(p_final)
@@ -763,8 +767,8 @@ class MapLogicNode(Node):
         origin, tl, tr, br, bl = pts_w
         
         lines = [
-            origin, tl, origin, tr, origin, br, origin, bl, # Raggi
-            tl, tr, tr, br, br, bl, bl, tl                  # Base rettangolare
+            origin, tl, origin, tr, origin, br, origin, bl, # Rays
+            tl, tr, tr, br, br, bl, bl, tl                  # Rectangular Base
         ]
         
         for p in lines:
@@ -772,83 +776,110 @@ class MapLogicNode(Node):
             
         self.pub_frustum.publish(marker)
 
+
+    """
+    This function is the core logic loop that decides the robot's next exploration target.
+    It performs the following steps:
+    1. Acquires a lock to prevent race conditions in a multi-threaded environment.
+    2. Checks for and handles deadlock conditions, potentially creating "ignored zones" around the deadlock point.
+    3. Verifies the current target: if it has been "resolved" (seen as free or occupied), it clears the target. Otherwise, it publishes the command to move towards it.
+    4. If no active target exists, it searches for the best new unknown target, considering factors like frontality, distance, and relevance.
+    5. If a new target is found, it sets it as the current target and publishes the command.
+    """
     def decision_loop(self):
 
         if not self.decision_lock.acquire(blocking=False):
             return
 
         try:
+            
+            # Take the camera position to compute the distance from the voxels around it
             if self.latest_cam_pose is None: return
             cam_pos = self.latest_cam_pose['pos']
             
-            # Snapshot locale per evitare race conditions (MultiThreading safety)
-            # Copiamo il valore attuale in una variabile locale e usiamo quella.
+            # Copy in a local variable the current target index
             curr_idx = self.current_target_idx 
 
+            # Before starting searching the best target check if some ignored zone needs to be free 
             self.check_and_liberate_zones()
             
-            # --- GESTIONE DEADLOCK ---
+            
+            # --- Deadlock Management ---
+            
             if self.is_deadlocked:
-                # Controllo di sicurezza: Abbiamo davvero un target da ignorare?
+                
                 if curr_idx is not None:
-                    self.get_logger().warn(f"🚫 Target {curr_idx} in DEADLOCK. Ignoro l'intera zona!")
                     
-                    # 1. Calcola e registra la zona
+                    self.get_logger().warn(f"🚫 Target {curr_idx} in DEADLOCK. I will ignore the entire zone!")
+                    
+                    # 1. Call the function to return the indexes of the voxels in the ignored zone
                     zone_indices = self.create_ignored_zone(curr_idx)
                     
-                    # 2. Aggiungi TUTTI i vicini alla ignore_list globale
+                    # 2. Adds these voxels to the ignored zone
                     for idx in zone_indices:
                         self.ignored_targets.add(idx)
                     
-                    # 3. Salva la posizione per la logica Safe/Risky
+                    # 3. Save the ignored target for the Safe\Risky Search
                     self.last_deadlock_pos = self.grid_to_world(*curr_idx)
                     
                     # 4. Reset
                     self.current_target_idx = None
+                    
                 else:
+                    
                     self.get_logger().warn("WARNING Deadlock Phantom. Reset.")
-                # Reset flag deadlock in ogni caso
+                    
+                # Reset flag deadlock 
                 self.is_deadlocked = False
                 self.last_moving_time = time.time()
-                return # Esci per questo ciclo
+                return 
                 
-            # ------------------------------
-
-            # --- CONTROLLO TARGET CORRENTE (Commitment) ---
-            # Nota: Usiamo curr_idx (la copia locale) per coerenza
+                
+            # --- Check Present Target ---
+            
+            # Check if the current target voxel has been "resolved" (seen as free or occupied). If so, search for a new target
             if curr_idx is not None:
-                # Leggiamo il valore attuale del voxel target
-                current_val = self.grid[curr_idx]
                 
-                # DEFINIZIONE DI "VISTO":
+                current_val = self.grid[curr_idx]       # Present Target 
+                
+                # Flag for a voxel with a specific attribute
                 is_resolved = (current_val < self.VAL_FREE) or (current_val > self.VAL_OCCUPIED)
                 
                 if is_resolved:
-                    self.get_logger().info(f"✅ TARGET {curr_idx} RISOLTO! (Val: {current_val}). Ne cerco un altro.")
-                    self.current_target_idx = None # Scriviamo sulla variabile globale per liberarla
+                    
+                    self.get_logger().info(f"✅ TARGET {curr_idx} Solved! (Val: {current_val}). Finding a new one.")
+                    
+                    # Reset Taret
+                    self.current_target_idx = None      
                 else:
                     target_pos = self.grid_to_world(*curr_idx)
                     self.publish_command(target_pos)
                     return
             
-            # =========================================================
-            # SE SIAMO QUI, SIGNIFICA CHE NON ABBIAMO UN TARGET ATTIVO.
-            # SOLO ORA POSSIAMO CERCARNE UNO NUOVO.
-            # =========================================================
-
+            
+            # --- Select New Target ---
+            
+            # If we get here means that we do not have a target and we need to find one.
+            # Search now a new one calling the ad-hoc function 
             best_idx = self.find_best_unknown_target(cam_pos)
 
-            # IL BRO FIX: Logica "Raschiare il Barile"
+            # Whenever we cannot find a target means that we should search in the ignored list
             if best_idx is None:
-                # Se non trovo target validi, MA ho dei target nella ignore_list...
-                if len(self.ignored_targets) > 0:
-                    self.get_logger().warn(f"♻️ FINITI TARGET. Reset Totale (ignore_list + Deadlock Pos).")
-                    self.ignored_targets.clear()
-                    self.last_deadlock_pos = None  # <--- RESET ANCHE QUESTO
+                
+                if len(self.ignored_targets) > 0:           # Check if there is any ignored voxel
                     
+                    self.get_logger().warn(f"♻️ FINITI TARGET. Reset Totale (ignore_list + Deadlock Pos).")
+                    
+                    # Reset the ignored voxels list and the target 
+                    self.ignored_targets.clear()
+                    self.last_deadlock_pos = None  
+                    
+                    # Now that we have done a reset we can search for a new target 
                     best_idx = self.find_best_unknown_target(cam_pos)
+                    
                 else:
-                    self.get_logger().info("🎉 ESPLORAZIONE COMPLETATA (O nessun target raggiungibile)!", throttle_duration_sec=5.0)
+                    
+                    self.get_logger().info("🎉 Completed Exploration!", throttle_duration_sec=5.0)
 
             if best_idx:
                 self.current_target_idx = best_idx
@@ -857,178 +888,216 @@ class MapLogicNode(Node):
             else:
                 # Se è ANCORA None anche dopo il reset, allora abbiamo davvero finito tutto.
                 pass
+
         finally:
             self.decision_lock.release()
 
+
+    """
+    Check all the ignored zones and if the 10% of them has been seen then free the entire zone
+    """
     def check_and_liberate_zones(self):
-        """
-        Controlla tutte le zone ignorate.
-        Se > 10% dei voxel di una zona sono stati 'Risolti' (Visti come Free o Occupied),
-        libera l'intera zona dalla ignore_list.
-        """
+        
         if not self.ignored_zones:
             return
 
-        zones_to_remove = []
+        zones_to_remove = []        # List of zones to remove from the ignored zone list
         
+        # Iterate over all the ignored zones to check
         for zone in self.ignored_zones:
-            # Contiamo quanti membri sono stati risolti
-            resolved_count = 0
             
+            resolved_count = 0      # Number of seen voxels in the zone
+            
+            # Iterate over the voxels in the zone
             for idx in zone.member_indices:
+                
+                # Take the value of the voxel
                 val = self.grid[idx]
-                # È risolto se NON è ignoto (cioè se è Free o Occupied)
-                # Nota: qui usiamo le soglie probabilistiche
+
+                # If solved
                 if val < self.VAL_FREE or val > self.VAL_OCCUPIED:
                     resolved_count += 1
             
-            # Calcolo percentuale
+            # Percentage Computation
             percentage = resolved_count / zone.total_count
             
-            if percentage >= 0.10: # 10% SOGLIA LIBERAZIONE
-                self.get_logger().info(f"🔓 LIBERATA ZONA (Visti {resolved_count}/{zone.total_count} voxel).")
+            # Trigger 
+            if percentage >= 0.10: # 10% Free Treshold
                 
-                # Rimuoviamo i membri dalla ignore_list globale
+                self.get_logger().info(f"🔓 Zone free! (Seen {resolved_count}/{zone.total_count} voxels).")
+                
+                # Remove members of the global ignore list  
                 for idx in zone.member_indices:
-                    # Usiamo discard per non avere errori se non c'è
                     self.ignored_targets.discard(idx)
                 
                 zones_to_remove.append(zone)
 
-        # Pulizia lista zone
+        # Clean List of Zones
         for z in zones_to_remove:
             try:
                 self.ignored_zones.remove(z)
             except ValueError:
-                pass # Era già stato rimosso, pazienza. Niente crash.
+                pass 
 
+
+    """
+    Select the best best unknown voxel to go to.
+    Includes: 
+    - Hysteresis: ignore voxels that have been just seen, they have to be above a safe treshold to be interesting (this ensure not to fall into the deadlock loop: Seen - Noise - New Target - Seen).
+    - Wall Skin Filter: we don't want target attached to the walls (occupied voxels) because often these voxels are just noise or walls.
+    - Ignore List Check
+    - Safe/Risky Logic for Deadlock: divide the candidates in two groups, the safe ones are far from the deadlock target and the risky ones are close.
+    - Score Logic: the target is chosen as the voxel with the highest score, which is given by distance from camera position, relevance and frontality.
+    """
     def find_best_unknown_target(self, robot_pos):
-        """
-        Seleziona il miglior voxel ignoto.
-        Include: Isteresi, Wall Skin Filter, ignore_list check e Logica Safe/Risky per Deadlock.
-        """
         
-        # --- 1. SELEZIONE CANDIDATI (Con Isteresi) ---
-        # Ignoriamo i voxel che sono "appena" diventati liberi (es. 30).
-        # Devono essere sopra una soglia di sicurezza (es. 30 + 15 = 45) per essere interessanti.
-        # Questo impedisce il loop "Risolto -> Rumore -> Nuovo Target -> Risolto".
-        SOGLIA_SELEZIONE = self.VAL_FREE + 15
-        mask_unknown = (self.grid >= SOGLIA_SELEZIONE) & (self.grid <= self.VAL_OCCUPIED)
+        SELECTION_TRESHOLD = self.VAL_FREE + 15
+        
+        
+        # --- 1. Candidate Selection (with hysteresis) ---
+       
+        mask_unknown = (self.grid >= SELECTION_TRESHOLD) & (self.grid <= self.VAL_OCCUPIED)
 
-        # --- 2. WALL SKIN PROTECTION (Filtro Muri) ---
-        # Non vogliamo target appiccicati ai muri (spesso sono solo rumore o irraggiungibili).
+
+        # --- 2. Wall Skin Protection (Walls Filter) ---
+        
+        # Create the mask for the occupied voxels
         mask_obstacles = (self.grid > self.VAL_OCCUPIED)
 
         if np.any(mask_obstacles):
-            # Dilatazione di 2 iterazioni (~7cm): Creiamo un cuscinetto di sicurezza.
+
+            # Create a safety skin around the occupied voxels (iteration is the thickness)
             mask_skin = binary_dilation(mask_obstacles, iterations=2)
             
-            # I candidati validi sono: IGNOTI ma NON PELLE DEL MURO.
+            # Valid candidates for being a target are the unknown voxels that are not in the wall skin
             mask_final_candidates = mask_unknown & (~mask_skin)
+            
         else:
+            
+            # If there are no occupied voxels
             mask_final_candidates = mask_unknown
 
-        # Estraiamo gli indici
+        # Extract indexes
         unknown_indices = np.argwhere(mask_final_candidates)
 
-        # --- FALLBACK 1: Skin troppo aggressiva? ---
-        if len(unknown_indices) == 0: 
-            # Se il filtro Skin ha rimosso tutto, proviamo a usare i candidati grezzi.
-            # Meglio rischiare di avvicinarsi a un muro che fermarsi del tutto.
-            unknown_indices = np.argwhere(mask_unknown)
-            if len(unknown_indices) == 0:
-                return None # Davvero nulla da vedere
 
-        # --- 3. PRE-FILTRAGGIO (Performance & ignore_list) ---
-        candidates = []
+        # --- Fallback: Skin tto much aggressive? ---
         
-        # Se sono troppi (es. > 5000), ne prendiamo un campione casuale subito per velocità
+        if len(unknown_indices) == 0: 
+            
+            # If the Skin filter removed everything, let's try using the raw candidates.
+            # Better to risk getting close to a wall than stopping completely.
+            unknown_indices = np.argwhere(mask_unknown)
+            
+            if len(unknown_indices) == 0:
+                return None # Truly nothing to see
+
+
+        # --- 3. Pre-Filtering (Performance & ignore_list) ---
+        
+        candidates = []                     # List of candidates
+        
+        # Performance Filter
+        # Check if there are too many unknown voxels: if so, select 5000 random ones
         temp_indices = unknown_indices
         if len(temp_indices) > 5000:
              rand_idx = np.random.choice(len(temp_indices), 5000, replace=False)
              temp_indices = temp_indices[rand_idx]
 
-        # Filtro ignore_list (Ignored Targets)
+        # Ignored List Filter
         for idx in temp_indices:
             t_idx = tuple(idx)
             if t_idx not in self.ignored_targets:
                 candidates.append(idx)
                 
-        if not candidates: return None
-        candidates = np.array(candidates) # Ritorna a numpy array per comodità
-
-        # --- 4. LOGICA DEADLOCK: SAFE vs RISKY ---
-        # Se siamo appena usciti da un deadlock, dividiamo i candidati in due gruppi.
+        if not candidates: 
+            return None
         
-        safe_candidates = []   # Lontani dal punto di blocco
-        risky_candidates = []  # Vicini al punto di blocco
-        
-        # Pool su cui iterare per lo scoring
-        final_pool = [] 
+        candidates = np.array(candidates)   # Returns an array numpy (better)
 
+
+        # --- 4. Deadlock Logic: Safe VS Risky ---
+        
+        safe_candidates = []            # Far from deadlock voxel
+        risky_candidates = []           # Close from deadlock voxel
+        
+        final_pool = []                 # Pool on which to iterate for the score
+
+        # If we are ine deadlock
         if self.last_deadlock_pos is not None:
-            # Iteriamo per separare i gruppi
+            
             for idx in candidates:
-                pos = self.grid_to_world(*idx)
-                dist_from_deadlock = np.linalg.norm(pos - self.last_deadlock_pos)
                 
+                pos = self.grid_to_world(*idx)                                          # World Position
+                dist_from_deadlock = np.linalg.norm(pos - self.last_deadlock_pos)       # Distance from deadlock
+                
+                # Pool division 
                 if dist_from_deadlock > self.DEADLOCK_MIN_DIST:
                     safe_candidates.append(idx)
                 else:
                     risky_candidates.append(idx)
             
-            # DECISIONE PRIORITÀ
-            if len(safe_candidates) > 0:
+            # Select a Pool
+            if len(safe_candidates) > 0:        # There are safe candidates
+                
                 final_pool = safe_candidates
-                # (Opzionale) Downsampling se i safe sono troppi
+                
+                # Downsampling
                 if len(final_pool) > 500:
                      rand_idx = np.random.choice(len(final_pool), 500, replace=False)
                      final_pool = [final_pool[i] for i in rand_idx]
                 
-                # self.get_logger().info(f"🔎 Priorità SAFE: Analizzo {len(final_pool)} target lontani dal deadlock.")
-            else:
-                # Se non c'è nulla di lontano, dobbiamo rischiare vicino
+            else:                               # There are no safe candidates
+
                 final_pool = risky_candidates
-                self.get_logger().warn("⚠️ Nessun target Safe! Costretto a usare fallback RISKY.")
+                
+                self.get_logger().warn("⚠️ No Safe Target Found! Choosing in the Risky Pool.")
+        
+        # If we are not in deadlock
         else:
-            # Nessun deadlock attivo, tutti i candidati sono buoni
-            final_pool = candidates
-            # Downsampling standard se sono troppi
+
+            final_pool = candidates             # All the candidates are good
+            
+            # Downsampling 
             if len(final_pool) > 500:
                 rand_idx = np.random.choice(len(final_pool), 500, replace=False)
-                # Nota: candidates è np.array, final_pool qui pure
                 final_pool = final_pool[rand_idx]
 
-        # --- 5. SCORING LOOP ---
+
+        # --- 5. Scoring Loop ---
+        
+        # Initialization
         best_score = -np.inf
         best_idx = None
         
-        # Parametri normalizzazione
-        y_min, y_max = self.WS_BOUNDS['y']
-        y_range = max(y_max - y_min, 1.0)
-        max_dist_norm = 1.5 
+        # Normalization Parameters (the relevenca one is in the get_relevance function)
+        y_min, y_max = self.WS_BOUNDS['y']          
+        y_range = max(y_max - y_min, 1.0)           # Frontality Normalization Parameter
+        max_dist_norm = 1.5                         # Distance Normalization Parameter
+        
 
         for idx in final_pool:
-            # Convertiamo indice in coordinate mondo
+            
+            # Convert index in world coordinates
             pos = self.grid_to_world(*idx)
 
-            # A. FRONTALITY (0.0 - 1.0): Preferiamo spazzare lungo Y in ordine
+            # A. Frontality (0.0 - 1.0): we prefer to choose voxels near the robot's base
             y_ratio = (pos[1] - y_min) / y_range
             norm_frontality = 1.0 - np.clip(y_ratio, 0.0, 1.0)
 
-            # B. DISTANCE (0.0 - 1.0): Preferiamo target vicini al robot
+            # B. Distance (0.0 - 1.0): we prefer to choose voxels close to the camera
             real_dist = np.linalg.norm(pos - robot_pos)
             dist_ratio = min(real_dist / max_dist_norm, 1.0)
             norm_dist_score = 1.0 - dist_ratio
 
-            # C. RELEVANCE (0.0 - 1.0): Preferiamo zone dense di ignoto
+            # C. Relevance (0.0 - 1.0): we prefer to choose voxels that are in a dense cloud of unknown voxels
             norm_relevance = self.get_relevance(idx[0], idx[1], idx[2])
 
-            # FORMULA SCORE FINALE
-            # Pesi:
-            # 3.0 Frontality -> Ordine di pulizia
-            # 2.0 Relevance  -> Efficienza (scoprire grossi buchi)
-            # 1.0 Distanza   -> Efficienza energetica
+            # Final Score Formula
+            # Weights:
+            # 3.0 Frontality
+            # 2.0 Relevance  
+            # 1.0 Distance   
             score = (3.0 * norm_frontality) + (2.0 * norm_relevance) + (1.0 * norm_dist_score)
             
             if score > best_score:
@@ -1037,43 +1106,44 @@ class MapLogicNode(Node):
 
         return best_idx
 
+    """
+    Get the relevance for the given voxel. The more are the neighbors unknown voxels the higher is the relevance.
+    """
     def get_relevance(self, ix, iy, iz):
-        # Estrai il cubo 3x3x3 intorno al voxel
+        
+        # Get the 3x3x3 cube around the voxel
         x_min, x_max = max(0, ix - 1), min(self.N_VOXELS_X, ix + 2)
         y_min, y_max = max(0, iy - 1), min(self.N_VOXELS_Y, iy + 2)
         z_min, z_max = max(0, iz - 1), min(self.N_VOXELS_Z, iz + 2)
         
         neighborhood = self.grid[x_min:x_max, y_min:y_max, z_min:z_max]
         
-        # Vecchio: np.sum(neighborhood == 0)
-        # NUOVO: Contiamo quanti vicini sono ancora nel "Limbo" (tra FREE e OCCUPIED)
-        # Ovvero quanti sono ancora "Grigi" (~50)
-        
+        # Count how many unknowns there are and remove the central voxel
         mask_unknown_neighbors = (neighborhood >= self.VAL_FREE) & (neighborhood <= self.VAL_OCCUPIED)
         unknown_neighbors = np.sum(mask_unknown_neighbors)
-        
-        # Rimuoviamo il voxel centrale dal conteggio (se era unknown anche lui)
-        # (Opzionale, ma matematicamente corretto)
         if (self.grid[ix, iy, iz] >= self.VAL_FREE) and (self.grid[ix, iy, iz] <= self.VAL_OCCUPIED):
              unknown_neighbors -= 1
              
-        # Normalizziamo su 26 vicini possibili
+        # Normalize the relevance
         return max(0, unknown_neighbors) / 26.0
 
-    def get_downsampled_obstacles(self, min_dist=0.07):
-        """
-        Estrae i voxel occupati dalla griglia persistente e li filtra
-        per mantenere una distanza minima (es. 10cm) tra loro.
-        Usa 'Spatial Hashing' per essere ultra-veloce.
-        """
-        # 1. Trova tutti gli indici dei voxel occupati (2)
+
+    """
+    Extracts occupied voxels from the persistent grid and filters them
+    to maintain a minimum distance (e.g., 10cm) between them.
+    Uses 'Spatial Hashing' for ultra-fast processing:
+        We divide the space into cells of size 'min_distance_rep'.
+        Points falling into the same cell will have the same integer key.
+    """
+    def get_downsampled_obstacles(self):
+        
+        # Find all the indexes of occupied voxels
         idx_occupied = np.argwhere(self.grid >= self.VAL_OCCUPIED)
         
         if len(idx_occupied) == 0:
             return []
 
-        # 2. Vettorizzazione: Converti tutti gli indici in coordinate World in un colpo solo
-        # (Molto più veloce di chiamare grid_to_world in un ciclo for)
+        # Vectorization and transform in world coordinates
         ix = idx_occupied[:, 0]
         iy = idx_occupied[:, 1]
         iz = idx_occupied[:, 2]
@@ -1082,56 +1152,69 @@ class MapLogicNode(Node):
         points_y = self.WS_BOUNDS['y'][0] + (iy + 0.5) * self.res_y
         points_z = self.WS_BOUNDS['z'][0] + (iz + 0.5) * self.res_z
         
-        # Matrice Nx3 dei punti occupati
+        # Occupied voxels matrix
         points = np.column_stack((points_x, points_y, points_z))
-
-        # 3. Spatial Hashing (Il trucco del Bro)
-        # Dividiamo lo spazio in celle grandi 'min_dist'. 
-        # Punti che cadono nella stessa cella avranno la stessa chiave intera.
-        # floor(1.25 / 0.07) -> chiave 12. 
-        keys = np.floor(points / min_dist).astype(int)
-
-        # Usiamo un dizionario per tenere UN SOLO punto per ogni chiave spaziale
+        
+        
+        # --- Spatial Hashing ---
+        
+        keys = np.floor(points / self.min_distance_rep).astype(int)
+        
+        # We use a dictionary to keep only one point for each spatial key
         unique_obstacles = {}
         
-        # Iteriamo e riempiamo il dizionario. 
-        # Essendo in Python, questo loop è il collo di bottiglia, ma con griglie normali è rapido.
+        # Iterate and fill the dictionary.
         for i in range(points.shape[0]):
-            # La chiave è una tupla (k_x, k_y, k_z)
+            
+            # The key is a tuple (k_x, k_y, k_z)
             k = tuple(keys[i])
-            # Se questa cella spaziale non è ancora rappresentata, aggiungiamo il punto
+            
+            # If this key is not represented then do it now
             if k not in unique_obstacles:
                 unique_obstacles[k] = points[i]
         
         # Restituisce solo i punti filtrati
         return list(unique_obstacles.values())
 
+
+    """
+    Publishes a VmcControlTarget message to guide the robot.
+    This message includes:
+    - The target attractor point for the robot's end-effector.
+    - A list of active obstacles (repulsors) derived from the voxel grid,
+        downsampled to maintain a minimum distance between them.
+    - A visualization marker for the active repulsors.
+    """
     def publish_command(self, target_pos):
+        
+        # Create the message for julia script
         msg = VmcControlTarget()
         msg.header.stamp = self.get_clock().now().to_msg()
+        
+        # Insert in the message the target 
         msg.target_attractor = Point(x=target_pos[0], y=target_pos[1], z=target_pos[2])
 
-        # --- MODIFICA IL BRO: USIAMO I VOXEL FILTRATI ---
-        # Invece di self.current_visible_obstacles, calcoliamo i repulsori dalla griglia
-        # con una spaziatura di 10 cm (0.10).
-        optimized_obstacles = self.get_downsampled_obstacles(min_dist=0.10)
+        # Filter the obstacle pointcloud 
+        optimized_obstacles = self.get_downsampled_obstacles()
 
+        # Insert in the message the obstacle list of repulsors
         for obs_pos in optimized_obstacles:
             msg.active_obstacles.append(Point(x=obs_pos[0], y=obs_pos[1], z=obs_pos[2]))
             
+        # Publish the message to julia
         self.pub_target.publish(msg)
 
-        # --- VISUALIZZAZIONE REPULSORI ---
+
+        # --- Repulsor Visualization ---
+        
         marker = Marker()
-        # ... (il resto del codice del marker rimane uguale, userà msg.active_obstacles che ora è corretto)
         marker.header.frame_id = "fr3_link0"
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = "active_repulsors"
         marker.id = 999
         marker.type = Marker.SPHERE_LIST
         marker.action = Marker.ADD
-        
-        # Magari aumentiamo leggermente la dimensione visiva per far capire che coprono 10cm
+
         marker.scale = Vector3(x=0.05, y=0.05, z=0.05) 
         marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.7) 
 
@@ -1146,13 +1229,6 @@ class MapLogicNode(Node):
         z = self.WS_BOUNDS['z'][0] + (iz + 0.5) * self.res_z
         return np.array([x, y, z])
         
-    def world_to_grid(self, p):
-        # Protezione divisione per zero e clamping
-        ix = int((p[0] - self.WS_BOUNDS['x'][0]) / self.res_x)
-        iy = int((p[1] - self.WS_BOUNDS['y'][0]) / self.res_y)
-        iz = int((p[2] - self.WS_BOUNDS['z'][0]) / self.res_z)
-        return ix, iy, iz
-
 
 def main(args=None):
     rclpy.init(args=args)
