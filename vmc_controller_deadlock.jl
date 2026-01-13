@@ -304,7 +304,7 @@ function ros_vm_controller(
 
         # Target & Obstacles Subscriber
         target_callback_wrapper = (target_msg) -> target_callback(target_msg, target_channel)
-        sub_target = node.create_subscription(VmcControlTarget, "/vmc/target", target_callback_wrapper, 10)
+        sub_target = node.create_subscription(VmcControlTarget, "/vmc/target&obstacles", target_callback_wrapper, 10)
 
         println("DEBUG [1.2]: Subscribers created.")
 
@@ -469,6 +469,8 @@ function ros_vm_controller(
 
                 vel_treshold = 0.02
 
+                max_link_vel = 0.0              # We use just the maximum velocity among all the links ones to represent the velocity situation
+
                 if should_print
                     println("\n🔍 --- DEBUG DEADLOCK (t=$(round(t, digits=2))) ---")
                     println("   🏎️  LINK VELOCITIES (Treshold = 0.02):")
@@ -484,6 +486,11 @@ function ros_vm_controller(
                     v_vec = VMRobotControl.velocity(control_cache, cid)
                     v_norm = norm(v_vec)
 
+                    # Update the maximum velocity to update the value to send to the python node
+                    if v_norm > max_link_vel
+                        max_link_vel = v_norm
+                    end
+
                     if should_print
                         marker = v_norm > vel_treshold ? "🔴" : "  "
                         @printf("      %s Link %d: %.4f m/s\n", marker, i, v_norm)
@@ -493,22 +500,24 @@ function ros_vm_controller(
 
                 # 2. Compute and Print Joint Torques
 
-                torq_treshold = 0.2
+                torque_treshold = 0.2
 
                 (all_torques, _) = VMRobotControl.get_generalized_force(control_cache)
 
-                current_torques = all_torques[1:7]  # First 7 are joint torques
+                current_torques = all_torques[1:7]                              # First 7 are joint torques
+
+                max_joint_torque = maximum(abs.(current_torques))               # We use just the maximum torque among all the joints ones to represent the torques situation
 
                 if should_print
 
                     println("   💪 JOINT TORQUES (Treshold = 0.20):")
                     for i in 1:7
                         tau = abs(current_torques[i])
-                        marker = tau > torq_treshold ? "🔴" : "  "
+                        marker = tau > torque_treshold ? "🔴" : "  "
                         @printf("      %s J%d:     %.4f Nm\n", marker, i, tau)
                     end
                                         
-                    if max_link_vel <= vel_treshold && max_joint_torque <= torq_treshold
+                    if max_link_vel <= vel_treshold && max_joint_torque <= torque_treshold
                         println("   💀 STATUS: Deadlock detected.")
                     else
                         println("   🟢 STATUS: No Deadlock")
