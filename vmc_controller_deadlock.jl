@@ -358,7 +358,7 @@ function ros_vm_controller(
         println("DEBUG [5]: Unpacking args...")
         try
             (target_id, rep_ids, cam_frame_id, link_coords_ids) = args
-            println("DEBUG [5.1]: Unpacking OK. Camera Frame ID found: $cam_fid")
+            println("DEBUG [5.1]: Unpacking OK. Camera Frame ID found: $cam_frame_id")
         catch e
             println("\n🔴 CRITICAL ERROR UNPACKING ARGS (Check f_setup return):")
             showerror(stdout, e, catch_backtrace())
