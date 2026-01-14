@@ -269,7 +269,7 @@ function ros_vm_controller(
 
         # Target & Obstacles Subscriber
         target_callback_wrapper = (target_msg) -> target_callback(target_msg, target_channel)
-        sub_target = node.create_subscription(VmcControlTarget, "/vmc/target&_obstacles", target_callback_wrapper, 10)
+        sub_target = node.create_subscription(VmcControlTarget, "/vmc/target_obstacles", target_callback_wrapper, 10)
 
         
         # --- ROS 2 Spin Task ---

@@ -80,7 +80,7 @@ const CAMERA_OFFSET = Transform(    # Camera mounted on the robot's end-effector
 # --- Shared Channels for Communication ---
 
 state_channel = Channel{Vector{Float64}}(1)         # Buffer for joint states
-target_channel = Channel{Any}(1)                    # Buffer for target and obstacles
+target_channel = Channel{Any}(2)                    # Buffer for target and obstacles
 
 
 # ======================================
@@ -224,7 +224,7 @@ end
 function f_control(cache, t, args, dt)
 
     (target_id, repulsor_ids, _, _) = args
-    
+
     # Non-blocking check for new target data
     if isready(target_channel)
 
@@ -255,6 +255,7 @@ function f_control(cache, t, args, dt)
                 cache[repulsor_ids[i]].coord_data.val[] = SVector(99.0, 99.0, 99.0)
             end
         end
+
     end
 end
 
@@ -271,6 +272,7 @@ function ros_vm_controller(
         E_max=500.0, # Increased specifically for debugging
     )
 
+    GC.enable(false)
     rclpy.init()
     node = nothing
 
@@ -353,7 +355,7 @@ function ros_vm_controller(
             rethrow(e)
         end
         
-        # Initialize the arguments for the f_setup 
+        # Initialize the arguments for the f_setup
         local target_id, rep_ids, cam_frame_id, link_coords_ids
 
         # Unpack args explicitly to check structure
@@ -377,7 +379,23 @@ function ros_vm_controller(
             function control_func!(t, dt)
 
                 NDOF = robot_ndof(control_cache)
-                latest_state_array = take!(state_channel)
+
+                # --- Debug Blocking ---
+
+                # Print before blocking in input
+                if mod(round(Int, t*100), 100) == 0 
+                    print("⌛ Waiting for ROS msg... ")
+                    Base.flush(stdout) 
+                end
+
+                latest_state_array = take!(state_channel)       # Possible Cause of Block
+
+                # Print after blocking in input
+                if mod(round(Int, t*100), 100) == 0
+                    println("✅ Got it!")
+                    Base.flush(stdout)
+                end
+
                 qʳ = latest_state_array[1:NDOF]
                 q̇ʳ = latest_state_array[NDOF+1:2*NDOF]
                 
@@ -392,8 +410,15 @@ function ros_vm_controller(
                 # ========================
 
                 # Apply Safety Clamp
-                SAFETY_LIMIT = 5.0                                                          # Safety limit for torques    
-                desired_torques = clamp.(desired_torques, -SAFETY_LIMIT, SAFETY_LIMIT)      # Clamp torques to safety limit
+                SAFETY_LIMIT = 3.0    
+                
+                if any(isnan, desired_torques) || any(isinf, desired_torques)
+                    println("\n💀 CRITICAL: Found NaN/Inf torque at time t=$t! Sending Zeros.")
+                    desired_torques = zeros(7)
+                else
+                    # Clamp only if torques are valid
+                    desired_torques = clamp.(desired_torques, -SAFETY_LIMIT, SAFETY_LIMIT)
+                end
 
                 pymsg = Float64MultiArray()
                 pymsg.data = pylist(desired_torques)
@@ -494,7 +519,7 @@ function ros_vm_controller(
                     end
 
                     if should_print
-                        marker = v_norm > vel_treshold ? "🔴" : "  "
+                        marker = v_norm <= vel_treshold ? "🔴" : "  "
                         @printf("      %s Link %d: %.4f m/s\n", marker, i, v_norm)
                     end
                 end
@@ -515,17 +540,20 @@ function ros_vm_controller(
                     println("   💪 JOINT TORQUES (Treshold = 0.20):")
                     for i in 1:7
                         tau = abs(current_torques[i])
-                        marker = tau > torque_treshold ? "🔴" : "  "
+                        marker = tau <= torque_treshold ? "🔴" : "  "
                         @printf("      %s J%d:     %.4f Nm\n", marker, i, tau)
                     end
                                         
-                    if max_link_vel <= vel_treshold && max_joint_torque <= torque_treshold
+                    if max_link_vel <= vel_treshold #=&& max_joint_torque <= torque_treshold=#
                         println("   💀 STATUS: Deadlock detected.")
                     else
                         println("   🟢 STATUS: No Deadlock")
                     end
 
                     println("--------------------------------------------------")
+
+                    # Force to print in the terminal
+                    Base.flush(stdout)
                 end
 
 
@@ -553,8 +581,16 @@ function ros_vm_controller(
         
         while !istaskdone(ros_task)
             try
+                # Debug check
+                if istaskfailed(ros_task)
+                    println("\n💀 Fatal Error: ROS node suddenly died!")
+                    fetch(ros_task)
+                    break
+                end
+
                 control_func!(t, dt)
                 t = t + dt
+
             catch e
                 println("\n🔴 CRITICAL ERROR INSIDE CONTROL LOOP at t=$t:")
                 showerror(stdout, e, catch_backtrace())
@@ -669,3 +705,6 @@ end
 cvms = compile(vms)
 qᵛ = Float64[]
 ros_vm_controller(cvms, qᵛ; f_control, f_setup, E_max=30.0)
+
+
+# Initial configuration [0.0305, -0.0428, 1.6126, 0.8134, -1.0366, -2.3703, -0.0245]

@@ -19,7 +19,7 @@ def generate_launch_description():
             'controller_name:=julia_torque_controller'
         ],
         output='screen',
-        respawn_delay=4.0 
+        respawn_delay=4.0
     )
 
 
@@ -59,11 +59,15 @@ def generate_launch_description():
         [startup_pkg_share, 'config', 'rviz2_config.rviz']
     )
 
+    rviz_video_config_file = PathJoinSubstitution(
+        [startup_pkg_share, 'config', 'rviz2_config_video.rviz']
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', rviz_config_file], 
+        arguments=['-d', rviz_video_config_file], 
         output='screen'
     )
 
@@ -86,12 +90,9 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        franka_cmd,
+        # franka_cmd,
         realsense_cmd,
         delayed_rviz,   
         delayed_vision,
         delayed_map
     ])
-    
-    
-    

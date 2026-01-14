@@ -38,6 +38,8 @@ class MapLogicNode(Node):
         
         super().__init__('map_pcl')
 
+        self.node_start_time = None                 # Used not to go in deadlock at time 0.0
+
         self.current_target_idx = None              # Current target voxel index (ix, iy, iz)
         
         self.decision_lock = threading.Lock()       # Lock for decision loop
@@ -53,18 +55,18 @@ class MapLogicNode(Node):
             'z': [ 0.2, 0.85]
         }
 
-        self.TARGET_VOXEL_SIZE = 0.03              # Voxel size in meters
+        self.TARGET_VOXEL_SIZE = 0.06             # Voxel size in meters
         
         # Dimensions of the workspace
         self.dim_x = self.WS_BOUNDS['x'][1] - self.WS_BOUNDS['x'][0]
         self.dim_y = self.WS_BOUNDS['y'][1] - self.WS_BOUNDS['y'][0]
         self.dim_z = self.WS_BOUNDS['z'][1] - self.WS_BOUNDS['z'][0]
-
+        
         # Calculate number of voxels in each dimension
         self.N_VOXELS_X = int(np.ceil(self.dim_x / self.TARGET_VOXEL_SIZE))
         self.N_VOXELS_Y = int(np.ceil(self.dim_y / self.TARGET_VOXEL_SIZE))
         self.N_VOXELS_Z = int(np.ceil(self.dim_z / self.TARGET_VOXEL_SIZE))
-    
+        
         # Voxels' dimensions
         self.res_x = self.dim_x / self.N_VOXELS_X
         self.res_y = self.dim_y / self.N_VOXELS_Y
@@ -131,10 +133,12 @@ class MapLogicNode(Node):
         
         # --- Deadlock Configuration ---
         
+        self.TIME_TRESHOLD_DEADLOCK = 5.0               # Time to wait before starting checking for deadlocks (to avoid initial ignored zone)
+
         self.DEADLOCK_VEL_EPS = 0.02                    # Min treshold for the links velocity
         self.DEADLOCK_TORQUE_EPS = 0.20                 # Min torque for the joints
         self.DEADLOCK_TIME_THRESHOLD = 1.0              # Time below the tresholds needed to trigger the deadlock
-        self.DEADLOCK_ZONE_RADIUS = 0.30                # Radius of the ignored zone to consider from the deadlock target
+        self.DEADLOCK_ZONE_RADIUS = 0.10                # Radius of the ignored zone to consider from the deadlock target
 
         self.DEADLOCK_MIN_DIST = 0.40                   # Minimum distance from last deadlock to pick a new target (for avoiding stucking again in the same area)
         self.last_deadlock_pos = None                   # Last deadlock target coordinates
@@ -143,6 +147,8 @@ class MapLogicNode(Node):
         self.is_deadlocked = False                      # Flag for the deadlock
         
         self.ignored_targets = set()                    # Set for the ignored target voxels
+        self.ignored_targets.clear()
+
         self.ignored_zones = []                         # List of ignored zones
 
 
@@ -217,6 +223,17 @@ class MapLogicNode(Node):
     Callback to check the deadlock condition and trigger the flag to start the deadlock avoidance routine
     """
     def cb_deadlock(self, msg):
+
+        if self.node_start_time is None:
+            self.node_start_time = time.time()
+            self.last_moving_time = time.time() 
+            return
+
+        elapsed_time = time.time() - self.node_start_time
+
+        if elapsed_time < self.TIME_TRESHOLD_DEADLOCK:
+            self.last_moving_time = time.time()
+            return
    
         if len(msg.data) < 2:       # That means that one of the two values is missing
             return
@@ -225,8 +242,8 @@ class MapLogicNode(Node):
         current_vel = msg.data[0]
         current_tau = msg.data[1]
         
-        # Flag to determine if the deadlock is occurring
-        is_static = (current_vel < self.DEADLOCK_VEL_EPS) and (current_tau < self.DEADLOCK_TORQUE_EPS)
+        # Flag to determine if the deadlock is occurring (torques probably are considering also the gravity compensation contribute, then avoid using torque control for now)
+        is_static = (current_vel < self.DEADLOCK_VEL_EPS) #=and (current_tau < self.DEADLOCK_TORQUE_EPS)=#
         
         # We are still moving
         if not is_static:
@@ -468,7 +485,7 @@ class MapLogicNode(Node):
         valid_z = Z[mask]
         
         # Create list of tuples for the set of ignored voxels
-        indices = list(zip(valid_x, valid_y, valid_z))
+        indices = [(int(x), int(y), int(z)) for x, y, z in zip(valid_x, valid_y, valid_z)]
         
         # Create the zone and append it to the ignore_zones array
         if len(indices) > 0:
@@ -557,6 +574,11 @@ class MapLogicNode(Node):
 
     """
     Publish the voxel grid.
+    Visualization:
+    - Unknown: Gray
+    - Occupied: Red
+    - Target: Yellow
+    - Ignored: Blue
     """
     def publish_voxel_grid(self):
         
@@ -575,8 +597,11 @@ class MapLogicNode(Node):
         
         # --- Colors Definition ---
         
-        # Free: Green
-        c_free = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.2) 
+        # Unknown: Gray
+        c_unknown = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.2)
+
+        # Free: Transparent
+        # c_free = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.05) 
         
         # Occupied: Red
         c_occupied = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.9) 
@@ -584,14 +609,57 @@ class MapLogicNode(Node):
         # Target: Yellow
         c_target   = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
 
+        # Ignored: Blue
+        c_ignored = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.6)
 
-        # --- 1. Free Space---
+
+        # --- 1. Unknown Space---
         
-        # Free: 0 < Water Level < VAL_MIN
+        # Unknown: VAL_FREE < Water Level < VAL_OCCUPIED
+        idx_unknown = np.argwhere((self.grid >= self.VAL_FREE) & (self.grid <= self.VAL_OCCUPIED))
+
+        # Downsampling 
+        step_unk = 1
+        if len(idx_unknown) > 10000:
+            step_unk = 1 
+        elif len(idx_unknown) > 5000:
+            step_unk = 1 
+
+        idx_unknown_viz = idx_unknown[::step_unk]
+
+        for ix, iy, iz in idx_unknown_viz:
+
+            # Skip so we don't substitute blue markers
+            if (int(ix), int(iy), int(iz)) in self.ignored_targets:
+                continue
+
+            p = self.grid_to_world(ix, iy, iz)
+            marker.points.append(Point(x=p[0], y=p[1], z=p[2]))
+            marker.colors.append(c_unknown)
+        
+
+        # --- 2. Free Space (Removed/Transparent) ---
+
+        """
+        # Free: VAL_MIN < Water Level < VAL_FREE
         idx_free = np.argwhere((self.grid < self.VAL_FREE) & (self.grid > 0))
-        
-            
-        # --- 2. Occupied Space ---
+
+        # Downsampling
+        step_free = 1
+        if len(idx_unknown) > 10000:
+            step_free = 1 
+        elif len(idx_unknown) > 5000:
+            step_free = 1 
+
+        idx_free_viz = idx_free[::2] 
+
+        for ix, iy, iz in idx_free_viz:
+            p = self.grid_to_world(ix, iy, iz)
+            marker.points.append(Point(x=p[0], y=p[1], z=p[2]))
+            marker.colors.append(c_free)
+        """
+
+        # --- 3. Occupied Space ---
         
         # Occupied: VAL_OCCUPIED < Water Level
         idx_occupied = np.argwhere(self.grid > self.VAL_OCCUPIED)
@@ -604,12 +672,17 @@ class MapLogicNode(Node):
         idx_occupied_viz = idx_occupied[::step_occ]
 
         for ix, iy, iz in idx_occupied_viz:
+
+            # Skip so we don't substitute blue markers
+            if (ix, iy, iz) in self.ignored_targets:
+                continue
+
             p = self.grid_to_world(ix, iy, iz)
             marker.points.append(Point(x=p[0], y=p[1], z=p[2]))
             marker.colors.append(c_occupied)
 
 
-        # --- 3. Target ---
+        # --- 4. Target ---
         
         if self.current_target_idx is not None:
             
@@ -623,6 +696,15 @@ class MapLogicNode(Node):
             marker.points.append(Point(x=p_target[0], y=p_target[1], z=p_target[2]))
             marker.colors.append(c_target)
             
+
+        # --- 5. Ignored ---
+
+        if len(self.ignored_targets) > 0:
+            for (ix, iy, iz) in self.ignored_targets:
+                p = self.grid_to_world(ix, iy, iz)
+                marker.points.append(Point(x=p[0], y=p[1], z=p[2]))
+                marker.colors.append(c_ignored)
+
         self.pub_viz.publish(marker)
 
 
@@ -967,7 +1049,7 @@ class MapLogicNode(Node):
         if np.any(mask_obstacles):
 
             # Create a safety skin around the occupied voxels (iteration is the thickness)
-            mask_skin = binary_dilation(mask_obstacles, iterations=2)
+            mask_skin = binary_dilation(mask_obstacles, iterations=1)
             
             # Valid candidates for being a target are the unknown voxels that are not in the wall skin
             mask_final_candidates = mask_unknown & (~mask_skin)
@@ -1049,7 +1131,7 @@ class MapLogicNode(Node):
                 
             else:                               # There are no safe candidates
 
-                final_pool = risky_candidates
+                # final_pool = risky_candidates
                 
                 self.get_logger().warn("⚠️ No Safe Target Found! Choosing in the Risky Pool.")
         
