@@ -90,6 +90,18 @@ const CAMERA_OFFSET = Transform(    # Camera mounted on the robot's end-effector
     Rotor(RotZ(pi/2))
 ) 
 
+# Initial Configuration: paste the terminal message got from the python script
+const INITIAL_CONFIG = Dict{String, SVector{3, Float64}}(
+    "fr3_link1"    => SVector(0.0000, 0.0000, 0.3330),
+    "fr3_link2"    => SVector(0.0000, 0.0000, 0.3160),
+    "fr3_link3"    => SVector(0.0000, -0.1500, 0.5000),
+    "fr3_link4"    => SVector(0.0820, 0.0000, 0.6000),
+    "fr3_link5"    => SVector(0.0000, 0.1500, 0.7000),
+    "fr3_link6"    => SVector(0.0880, 0.0000, 0.8000),
+    "fr3_link7"    => SVector(0.0000, 0.0000, 0.9000),
+    "fr3_hand_tcp" => SVector(0.3000, 0.0000, 0.5000)
+)
+
 
 # --- Shared Channels for Communication ---
 
@@ -199,6 +211,32 @@ end
 println("✅ VMS Built.")
 
 
+# ======================================
+# --- VMC Creation for Homing ---
+#
+# We need to reach an initial configuration
+# which is always the same for every test.
+# This VMC pulls the links to this initial
+# configuration
+# ======================================
+
+for (link_name, target_pos) in INITIAL_CONFIG
+    
+    # Define the fixed target given by the initial configuration dictionary
+    target_id = "homing_target_$(link_name)"
+    add_coordinate!(vms, ReferenceCoord(Ref(target_pos)); id=target_id)
+
+    # Define the error 
+    err_id = "homing_error_$(link_name)"
+    robot_link_id = ".robot.$(link_name)_pos"
+    add_coordinate!(vms, CoordDifference(target_id, robot_link_id); id=err_id)
+
+    # VMC
+    add_component!(vms, TanhSpring(err_id; max_force=50.0, stiffness=300.0); id="homing_spring_$(link_name)")
+    add_component!(vms, LinearDamper(5.0, err_id); id="homing_damper_$(link_name)")
+
+end
+
 
 # ======================================
 # --- Control Logic Functions ---
@@ -212,6 +250,25 @@ function f_setup(cache)
 
     # Frame ID for Telemetry (to send pose to Python)
     cam_frame_id = get_compiled_frameID(cache, ".robot.camera_frame")
+
+    # Homing Components IDs
+    homing_spring_ids = []
+    homing_damper_ids = []
+
+    for (link_name, _) in INITIAL_CONFIG
+        try
+            # Get Spring ID
+            sid = get_compiled_componentID(cache, "homing_spring_$(link_name)")
+            push!(homing_spring_ids, sid)
+
+            # Get Damper ID
+            did = get_compiled_componentID(cache, "homing_damper_$(link_name)")
+            push!(homing_damper_ids, did)
+            
+        catch e
+            println("⚠️ Setup Error for homing component $link_name: $e")
+        end
+    end
 
 
     # --- Link Coordinates for Velocity Check ---
@@ -232,12 +289,63 @@ function f_setup(cache)
         end
     end
     
-    return (target_id, repulsor_ids, cam_frame_id, link_coords_ids)
+    return (target_id, repulsor_ids, cam_frame_id, homing_spring_ids, homing_damper_ids)
 end
 
 function f_control(cache, t, args, dt)
 
     (target_id, repulsor_ids, _, _) = args
+
+    STARTUP_TIME = 5.0
+
+    # --- PHASE 1: HOMING LINK ---
+
+    if t <= STARTUP_TIME
+
+        # Deactivate the atrtactor for the camera
+        cam_tf = VMRobotControl.get_transform(cache, cam_frame_id)
+        cache[target_id].coord_data.val[] = cam_tf.origin
+        
+        # Empty the target channel but don't block
+        if isready(target_channel)
+            take!(target_channel)
+        end
+        
+        if mod(round(Int, t*50), 50) == 0
+            println("🧘 Phase 1: Homing Link in progess...")
+        end
+        return
+    end
+
+
+    # --- PHASE 2: TURN OFF HOMING (SPRING + DAMPER) ---
+    
+    if length(homing_spring_ids) > 0
+
+        # Check if the first component has been turned off, if so then the shutting down of the homing impedances has already been done 
+        first_spring = cache.components[homing_spring_ids[1]]
+        
+        if first_spring.stiffness > 0.0
+            
+            println("✂️ Time to turn off homing!: Deactivating homing components!")
+            
+            for i in 1:length(homing_spring_ids)
+                
+                # A. Turn Off Spring (Stiffness -> 0, MaxForce -> 0)
+                s_id = homing_spring_ids[i]
+                old_spring = cache.components[s_id]
+                cache.components[s_id] = VMRobotControl.remake(old_spring; stiffness=0.0, max_force=0.0)
+                
+                # B. Turn Off Damper (Damping -> 0)
+                d_id = homing_damper_ids[i]
+                old_damper = cache.components[d_id]
+                cache.components[d_id] = VMRobotControl.remake(old_damper; damping=0.0)
+            end
+        end
+    end
+
+
+    # --- PHASE 3: MAPPING ---
 
     # Non-blocking check for new target data
     if isready(target_channel)

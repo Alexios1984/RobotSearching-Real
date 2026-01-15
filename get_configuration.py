@@ -29,8 +29,8 @@ class ConfigSnapper(Node):
             x = link_data.position.x
             y = link_data.position.y
             z = link_data.position.z
-            
-            print(f'\n    "{name}" : (x:{x:.4f}, y:{y:.4f}, z:{z:.4f}),')
+
+            print(f'\n    "{name}"  => SVector({x:.4f}, {y:.4f}, {z:.4f}),')
             
         print("="*60)
         print("\n")
