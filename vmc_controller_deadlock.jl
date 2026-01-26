@@ -76,6 +76,8 @@ const CAMERA_OFFSET = Transform(    # Camera mounted on the robot's end-effector
     Rotor(RotZ(pi/2))
 ) 
 
+const verbose = false               # Flag to activate the verbose prints               
+
 
 # --- Shared Channels for Communication ---
 
@@ -235,7 +237,7 @@ function f_control(cache, t, args, dt)
         obstacles = data[2]         # New Obstacles List
         
         # println("🎯 New Target Voxel: [x=$(round(new_target[1], digits=3)), y=$(round(new_target[2], digits=3)), z=$(round(new_target[3], digits=3))]")
-
+        println("t: $(round(t, digits=2))")
         
         # -- Update Target ---
         
@@ -383,17 +385,21 @@ function ros_vm_controller(
                 # --- Debug Blocking ---
 
                 # Print before blocking in input
-                if mod(round(Int, t*100), 100) == 0 
-                    print("⌛ Waiting for ROS msg... ")
-                    Base.flush(stdout) 
+                if verbose
+                    if mod(round(Int, t*100), 100) == 0 
+                        print("⌛ Waiting for ROS msg... ")
+                        Base.flush(stdout) 
+                    end
                 end
 
                 latest_state_array = take!(state_channel)       # Possible Cause of Block
 
                 # Print after blocking in input
-                if mod(round(Int, t*100), 100) == 0
-                    println("✅ Got it!")
-                    Base.flush(stdout)
+                if verbose
+                    if mod(round(Int, t*100), 100) == 0
+                        println("✅ Got it!")
+                        Base.flush(stdout)
+                    end
                 end
 
                 qʳ = latest_state_array[1:NDOF]
@@ -498,12 +504,14 @@ function ros_vm_controller(
 
                 max_link_vel = 0.0              # We use just the maximum velocity among all the links ones to represent the velocity situation
 
-                if should_print
-                    println("\n🔍 --- DEBUG DEADLOCK (t=$(round(t, digits=2))) ---")
-                    println("   🏎️  LINK VELOCITIES (Treshold = 0.02):")
+                if verbose
+                    if should_print
+                        println("\n🔍 --- DEBUG DEADLOCK (t=$(round(t, digits=2))) ---")
+                        println("   🏎️  LINK VELOCITIES (Treshold = 0.02):")
+                    end
                 end
 
-                if isempty(link_coords_ids) && should_print
+                if isempty(link_coords_ids) && should_print && verbose
                     println("      ❌ ERROR! There are no link coordinates for velocity check.")
                 end
 
@@ -518,9 +526,11 @@ function ros_vm_controller(
                         max_link_vel = v_norm
                     end
 
-                    if should_print
-                        marker = v_norm <= vel_treshold ? "🔴" : "  "
-                        @printf("      %s Link %d: %.4f m/s\n", marker, i, v_norm)
+                    if verbose
+                        if should_print
+                            marker = v_norm <= vel_treshold ? "🔴" : "  "
+                            @printf("      %s Link %d: %.4f m/s\n", marker, i, v_norm)
+                        end
                     end
                 end
 
@@ -535,7 +545,7 @@ function ros_vm_controller(
 
                 max_joint_torque = maximum(abs.(current_torques))               # We use just the maximum torque among all the joints ones to represent the torques situation
 
-                if should_print
+                if should_print && verbose
 
                     println("   💪 JOINT TORQUES (Treshold = 0.20):")
                     for i in 1:7
@@ -555,6 +565,7 @@ function ros_vm_controller(
                     # Force to print in the terminal
                     Base.flush(stdout)
                 end
+
 
 
                 # ========================

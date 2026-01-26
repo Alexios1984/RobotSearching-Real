@@ -137,7 +137,7 @@ class MapLogicNode(Node):
 
         self.DEADLOCK_VEL_EPS = 0.02                    # Min treshold for the links velocity
         self.DEADLOCK_TORQUE_EPS = 0.20                 # Min torque for the joints
-        self.DEADLOCK_TIME_THRESHOLD = 1.0              # Time below the tresholds needed to trigger the deadlock
+        self.DEADLOCK_TIME_THRESHOLD = 3.0              # Time below the tresholds needed to trigger the deadlock
         self.DEADLOCK_ZONE_RADIUS = 0.10                # Radius of the ignored zone to consider from the deadlock target
 
         self.DEADLOCK_MIN_DIST = 0.40                   # Minimum distance from last deadlock to pick a new target (for avoiding stucking again in the same area)
@@ -188,8 +188,8 @@ class MapLogicNode(Node):
         self.pub_target = self.create_publisher(                    # Target voxel and set of obstacles
             VmcControlTarget, '/vmc/target_obstacles', 10)
 
-        self.pub_debug_pcl = self.create_publisher(                 # Pointcloud filtered (within the workspace)
-            PointCloud2, '/vmc/debug_obstacles', 10)
+        # self.pub_debug_pcl = self.create_publisher(                 # Pointcloud filtered (within the workspace)
+        #     PointCloud2, '/vmc/debug_obstacles', 10)
 
         self.pub_repulsors_viz = self.create_publisher(             # Markers that represent the repulsor used by VMC
             Marker, '/vmc/repulsors_viz', 10)
@@ -378,7 +378,7 @@ class MapLogicNode(Node):
         pc2_msg = pc2.create_cloud_xyz32(debug_header, valid_points)
         
         # Publish the filtered pointcloud
-        self.pub_debug_pcl.publish(pc2_msg)
+        # self.pub_debug_pcl.publish(pc2_msg)
         
         
         # --- 8. Downsampling ---
@@ -474,10 +474,9 @@ class MapLogicNode(Node):
         
         # Compute the distance from the center for each voxel
         dist_sq = (X - cx)**2 + (Y - cy)**2 + (Z - cz)**2
-        r_sq = r_vox**2
         
         # Create the mask for the voxels inside the BB
-        mask = dist_sq <= r_sq
+        mask = dist_sq <= r_vox**2
         
         # Extract the valid indexes 
         valid_x = X[mask]
@@ -485,15 +484,24 @@ class MapLogicNode(Node):
         valid_z = Z[mask]
         
         # Create list of tuples for the set of ignored voxels
-        indices = [(int(x), int(y), int(z)) for x, y, z in zip(valid_x, valid_y, valid_z)]
-        
-        # Create the zone and append it to the ignore_zones array
-        if len(indices) > 0:
-            new_zone = IgnoredZone(indices)
-            self.ignored_zones.append(new_zone)
-            self.get_logger().warn(f"🚫 Created IGNOREZONE with {len(indices)} voxels (R={self.DEADLOCK_ZONE_RADIUS}m)")
+        indices_to_ignore = []
+
+        # Filter for unknown voxels only
+        for x, y, z in zip(valid_x, valid_y, valid_z):
             
-        return indices
+            val = self.grid[x, y, z]
+            
+            # If this is unknown, then it will be ignored, otherwise we skip it
+            if val >= self.VAL_FREE and val <= self.VAL_OCCUPIED:
+                indices_to_ignore.append((int(x), int(y), int(z)))
+
+        # Create the zone and append it to the ignore_zones array
+        if len(indices_to_ignore) > 0:
+            new_zone = IgnoredZone(indices_to_ignore)
+            self.ignored_zones.append(new_zone)
+            self.get_logger().warn(f"🚫 Created IGNOREZONE with {len(indices_to_ignore)} voxels (R={self.DEADLOCK_ZONE_RADIUS}m)")
+            
+        return indices_to_ignore
 
     """
     Uses the analogy to the water buckets to update the empty space in the grid.
@@ -749,7 +757,7 @@ class MapLogicNode(Node):
         marker.scale.x = 0.15
         marker.scale.y = 0.0
         marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
-        marker.text = f"Exploration:{percentage:.1f}%"
+        marker.text = f"Found {explored_count} / {total_voxels} Voxels"
 
         self.pub_status_text.publish(marker)
 
@@ -943,33 +951,33 @@ class MapLogicNode(Node):
             
             # If we get here means that we do not have a target and we need to find one.
             # Search now a new one calling the ad-hoc function 
-            best_idx = self.find_best_unknown_target(cam_pos)
+            best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
 
             # Whenever we cannot find a target means that we should search in the ignored list
             if best_idx is None:
                 
                 if len(self.ignored_targets) > 0:           # Check if there is any ignored voxel
                     
-                    self.get_logger().warn(f"♻️ FINITI TARGET. Reset Totale (ignore_list + Deadlock Pos).")
+                    self.get_logger().warn(f"♻️ No targets. Reset (ignore_list + Deadlock Pos).")
                     
                     # Reset the ignored voxels list and the target 
                     self.ignored_targets.clear()
                     self.last_deadlock_pos = None  
                     
                     # Now that we have done a reset we can search for a new target 
-                    best_idx = self.find_best_unknown_target(cam_pos)
-                    
-                else:
-                    
-                    self.get_logger().info("🎉 Completed Exploration!", throttle_duration_sec=5.0)
+                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
+
+                if best_idx is None:
+                     
+                    self.get_logger().warn("⚠️ No safe or ignored voxels available: Wall Skin Filter Off.")
+                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
 
             if best_idx:
                 self.current_target_idx = best_idx
                 target_pos = self.grid_to_world(*best_idx)
                 self.publish_command(target_pos)
             else:
-                # Se è ANCORA None anche dopo il reset, allora abbiamo davvero finito tutto.
-                pass
+                self.get_logger().info("🎉 Completed Exploration! (Davvero finito tutto, anche i risky).", throttle_duration_sec=5.0)
 
         finally:
             self.decision_lock.release()
@@ -1031,7 +1039,7 @@ class MapLogicNode(Node):
     - Safe/Risky Logic for Deadlock: divide the candidates in two groups, the safe ones are far from the deadlock target and the risky ones are close.
     - Score Logic: the target is chosen as the voxel with the highest score, which is given by distance from camera position, relevance and frontality.
     """
-    def find_best_unknown_target(self, robot_pos):
+    def find_best_unknown_target(self, robot_pos, allow_risky_skin=False):
         
         SELECTION_TRESHOLD = self.VAL_FREE + 15
         
@@ -1042,22 +1050,30 @@ class MapLogicNode(Node):
 
 
         # --- 2. Wall Skin Protection (Walls Filter) ---
-        
-        # Create the mask for the occupied voxels
-        mask_obstacles = (self.grid > self.VAL_OCCUPIED)
 
-        if np.any(mask_obstacles):
+        # If we run out of available voxel we skip this wall skin filter
+        if allow_risky_skin:
 
-            # Create a safety skin around the occupied voxels (iteration is the thickness)
-            mask_skin = binary_dilation(mask_obstacles, iterations=1)
-            
-            # Valid candidates for being a target are the unknown voxels that are not in the wall skin
-            mask_final_candidates = mask_unknown & (~mask_skin)
+            mask_final_candidates = mask_unknown
+            self.get_logger().info("⚠️ Searching inside WALL SKINS (Risky Mode).")
             
         else:
-            
-            # If there are no occupied voxels
-            mask_final_candidates = mask_unknown
+        
+            # Create the mask for the occupied voxels
+            mask_obstacles = (self.grid > self.VAL_OCCUPIED)
+
+            if np.any(mask_obstacles):
+
+                # Create a safety skin around the occupied voxels (iteration is the thickness)
+                mask_skin = binary_dilation(mask_obstacles, iterations=1)
+                
+                # Valid candidates for being a target are the unknown voxels that are not in the wall skin
+                mask_final_candidates = mask_unknown & (~mask_skin)
+                
+            else:
+                
+                # If there are no occupied voxels
+                mask_final_candidates = mask_unknown
 
         # Extract indexes
         unknown_indices = np.argwhere(mask_final_candidates)

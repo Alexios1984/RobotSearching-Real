@@ -90,16 +90,19 @@ const CAMERA_OFFSET = Transform(    # Camera mounted on the robot's end-effector
     Rotor(RotZ(pi/2))
 ) 
 
+const verbose = false               # Flag to activate the verbose prints               
+
 # Initial Configuration: paste the terminal message got from the python script
 const INITIAL_CONFIG = Dict{String, SVector{3, Float64}}(
-    "fr3_link1"    => SVector(0.0000, 0.0000, 0.3330),
-    "fr3_link2"    => SVector(0.0000, 0.0000, 0.3160),
-    "fr3_link3"    => SVector(0.0000, -0.1500, 0.5000),
-    "fr3_link4"    => SVector(0.0820, 0.0000, 0.6000),
-    "fr3_link5"    => SVector(0.0000, 0.1500, 0.7000),
-    "fr3_link6"    => SVector(0.0880, 0.0000, 0.8000),
-    "fr3_link7"    => SVector(0.0000, 0.0000, 0.9000),
-    "fr3_hand_tcp" => SVector(0.3000, 0.0000, 0.5000)
+    "fr3_link1"     => SVector(0.0000, 0.0000, 0.3330),
+    "fr3_link2"     => SVector(0.0000, 0.0000, 0.3330),
+    "fr3_link3"     => SVector(-0.2211, 0.0070, 0.5586),
+    "fr3_link4"     => SVector(-0.1622, 0.0075, 0.6164),
+    "fr3_link5"     => SVector(0.2297, 0.0025, 0.5909),
+    "fr3_link6"     => SVector(0.2297, 0.0025, 0.5909),
+    "fr3_link7"     => SVector(0.3177, 0.0017, 0.5905),
+    "fr3_hand_tcp"  => SVector(0.3166, -0.0040, 0.3802)
+
 )
 
 
@@ -289,12 +292,12 @@ function f_setup(cache)
         end
     end
     
-    return (target_id, repulsor_ids, cam_frame_id, homing_spring_ids, homing_damper_ids)
+    return (target_id, repulsor_ids, cam_frame_id, homing_spring_ids, homing_damper_ids, link_coords_ids)
 end
 
 function f_control(cache, t, args, dt)
 
-    (target_id, repulsor_ids, _, _) = args
+    (target_id, repulsor_ids, cam_frame_id, homing_spring_ids, homing_damper_ids, _) = args
 
     STARTUP_TIME = 5.0
 
@@ -341,6 +344,8 @@ function f_control(cache, t, args, dt)
                 old_damper = cache.components[d_id]
                 cache.components[d_id] = VMRobotControl.remake(old_damper; damping=0.0)
             end
+
+            println("Starting Mapping!")
         end
     end
 
@@ -477,14 +482,15 @@ function ros_vm_controller(
 
             try 
 
-                # Obtain ID and Position
-                cid = VMRobotControl.get_compiled_coordID(control_cache, ".robot.$(lname)_pos")
-                pos = VMRobotControl.position(control_cache, cid)
+                # Obtain Frames ID and Position
+                fid = VMRobotControl.get_compiled_frameID(control_cache, ".robot.$(link_name)")
+                tf = VMRobotControl.get_transform(control_cache, fid)
+                pos = tf.origin
 
                 # Creation of LinkData message
-                link_item = LinkData()
+                link_item = LinkDataMsg()
 
-                link_item.link_name = lname     # Link Name
+                link_item.link_name = link_name     # Link Name
 
                 p = PointMsg()
                 p.x = pos[1]
@@ -495,7 +501,7 @@ function ros_vm_controller(
                 push!(links_list, link_item)
             
             catch e
-                println("⚠️ Impossible to get configuration for link $lname: $e")
+                println("⚠️ Impossible to get configuration for link $link_name: $e")
             end
         end
 
@@ -536,7 +542,7 @@ function ros_vm_controller(
         # Unpack args explicitly to check structure
         println("DEBUG [5]: Unpacking args...")
         try
-            (target_id, rep_ids, cam_frame_id, link_coords_ids) = args
+            (target_id, rep_ids, cam_frame_id, homing_springs, homing_dampers, link_coords_ids) = args
             println("DEBUG [5.1]: Unpacking OK. Camera Frame ID found: $cam_frame_id")
         catch e
             println("\n🔴 CRITICAL ERROR UNPACKING ARGS (Check f_setup return):")
@@ -558,17 +564,21 @@ function ros_vm_controller(
                 # --- Debug Blocking ---
 
                 # Print before blocking in input
-                if mod(round(Int, t*100), 100) == 0 
-                    print("⌛ Waiting for ROS msg... ")
-                    Base.flush(stdout) 
+                if verbose
+                    if mod(round(Int, t*100), 100) == 0 
+                        print("⌛ Waiting for ROS msg... ")
+                        Base.flush(stdout) 
+                    end
                 end
 
                 latest_state_array = take!(state_channel)       # Possible Cause of Block
 
                 # Print after blocking in input
-                if mod(round(Int, t*100), 100) == 0
-                    println("✅ Got it!")
-                    Base.flush(stdout)
+                if verbose
+                    if mod(round(Int, t*100), 100) == 0
+                        println("✅ Got it!")
+                        Base.flush(stdout)
+                    end
                 end
 
                 qʳ = latest_state_array[1:NDOF]
@@ -673,12 +683,14 @@ function ros_vm_controller(
 
                 max_link_vel = 0.0              # We use just the maximum velocity among all the links ones to represent the velocity situation
 
-                if should_print
-                    println("\n🔍 --- DEBUG DEADLOCK (t=$(round(t, digits=2))) ---")
-                    println("   🏎️  LINK VELOCITIES (Treshold = 0.02):")
+                if verbose
+                    if should_print
+                        println("\n🔍 --- DEBUG DEADLOCK (t=$(round(t, digits=2))) ---")
+                        println("   🏎️  LINK VELOCITIES (Treshold = 0.02):")
+                    end
                 end
 
-                if isempty(link_coords_ids) && should_print
+                if isempty(link_coords_ids) && should_print && verbose
                     println("      ❌ ERROR! There are no link coordinates for velocity check.")
                 end
 
@@ -693,12 +705,13 @@ function ros_vm_controller(
                         max_link_vel = v_norm
                     end
 
-                    if should_print
-                        marker = v_norm <= vel_treshold ? "🔴" : "  "
-                        @printf("      %s Link %d: %.4f m/s\n", marker, i, v_norm)
+                    if verbose
+                        if should_print
+                            marker = v_norm <= vel_treshold ? "🔴" : "  "
+                            @printf("      %s Link %d: %.4f m/s\n", marker, i, v_norm)
+                        end
                     end
                 end
-
 
                 # 2. Compute and Print Joint Torques
 
@@ -710,7 +723,7 @@ function ros_vm_controller(
 
                 max_joint_torque = maximum(abs.(current_torques))               # We use just the maximum torque among all the joints ones to represent the torques situation
 
-                if should_print
+                if should_print && verbose
 
                     println("   💪 JOINT TORQUES (Treshold = 0.20):")
                     for i in 1:7
@@ -731,7 +744,8 @@ function ros_vm_controller(
                     Base.flush(stdout)
                 end
 
-
+                
+                
                 # ========================
                 # --- Publish Deadlock ---
                 # ========================
@@ -879,7 +893,7 @@ end
 
 cvms = compile(vms)
 qᵛ = Float64[]
-ros_vm_controller(cvms, qᵛ; f_control, f_setup, E_max=30.0)
+ros_vm_controller(cvms, qᵛ; f_control, f_setup, E_max=100.0)
 
 
 # Initial configuration [0.0305, -0.0428, 1.6126, 0.8134, -1.0366, -2.3703, -0.0245]
