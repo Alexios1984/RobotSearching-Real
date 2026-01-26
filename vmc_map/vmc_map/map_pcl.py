@@ -117,7 +117,7 @@ class MapLogicNode(Node):
         self.FOV_H = np.deg2rad(87.0) 
         self.FOV_V = np.deg2rad(58.0)
         self.MAX_DEPTH = 0.40               # Max depth to consider (meters). Less than the sensor max for performance (for safety) 
-
+        self.MIN_DEPTH = 0.07               # Min depth to consider (meters). Same as the sensor min for performance  
 
         # --- Logic Configuration ---
         
@@ -533,6 +533,86 @@ class MapLogicNode(Node):
             
         return indices_to_ignore
 
+
+    """
+    Compute the Axis-Aligned Bounding Box (AABB) of the frustum in grid coordinates.
+    This is used to limit the voxel search only to the area the camera is looking at,
+    instead of checking the entire workspace.
+    """
+    def get_frustum_aabb(self, T_world_cam):
+        
+        # --- 1. Define frustum lenght [Camera Frame]
+        z_near = 0.07
+        z_far = self.MAX_DEPTH
+        
+        tan_h = np.tan(self.FOV_H / 2.0)
+        tan_v = np.tan(self.FOV_V / 2.0)
+
+        # Frustum box (Near plane + Far plane)
+        corners_cam = [
+            # Origin (useful approximation)
+            [0, 0, 0], 
+            # Near Plane
+            [-z_near * tan_h, -z_near * tan_v, z_near],
+            [ z_near * tan_h, -z_near * tan_v, z_near],
+            [ z_near * tan_h,  z_near * tan_v, z_near],
+            [-z_near * tan_h,  z_near * tan_v, z_near],
+            # Far Plane
+            [-z_far * tan_h, -z_far * tan_v, z_far],
+            [ z_far * tan_h, -z_far * tan_v, z_far],
+            [ z_far * tan_h,  z_far * tan_v, z_far],
+            [-z_far * tan_h,  z_far * tan_v, z_far],
+        ]
+        corners_cam = np.array(corners_cam)
+        
+        # --- 2. Transform [World Frame]
+        # Add column of 1s for homogeneous coordinates
+        ones = np.ones((corners_cam.shape[0], 1))
+        corners_cam_h = np.hstack([corners_cam, ones])
+        
+        # Apply T_world_cam transformation to points
+        corners_world = (T_world_cam @ corners_cam_h.T).T[:, :3]
+        
+        # --- 3. Convert to Grid Indices
+        ix = ((corners_world[:, 0] - self.WS_BOUNDS['x'][0]) / self.res_x).astype(int)
+        iy = ((corners_world[:, 1] - self.WS_BOUNDS['y'][0]) / self.res_y).astype(int)
+        iz = ((corners_world[:, 2] - self.WS_BOUNDS['z'][0]) / self.res_z).astype(int)
+        
+        # 4. Find Min and Max (with clipping to stay within grid bounds)
+        min_ix, max_ix = np.min(ix), np.max(ix)
+        min_iy, max_iy = np.min(iy), np.max(iy)
+        min_iz, max_iz = np.min(iz), np.max(iz)
+        
+        return (
+            max(0, min_ix), min(self.N_VOXELS_X, max_ix + 1),
+            max(0, min_iy), min(self.N_VOXELS_Y, max_iy + 1),
+            max(0, min_iz), min(self.N_VOXELS_Z, max_iz + 1)
+        )
+        
+    
+    
+    """
+    Pure geometric check function.
+    Returns True if a volume (sphere enclosing the voxel/node) touches the frustum.
+    """
+    def check_frustum_overlap(self, center_in_cam_frame, radius):
+        
+        x_c, y_c, z_c = center_in_cam_frame
+        
+        tan_h = np.tan(self.FOV_H / 2.0)
+        tan_v = np.tan(self.FOV_V / 2.0)
+
+        # Check Depth
+        if (z_c - radius) > self.MAX_DEPTH: return False
+        if (z_c + radius) < self.MIN_DEPTH: return False
+
+        # Check Lateral sides (adding radius as margin)
+        if np.abs(x_c) > (z_c * tan_h + radius): return False
+        if np.abs(y_c) > (z_c * tan_v + radius): return False
+        
+        return True
+
+
     """
     Uses the analogy to the water buckets to update the empty space in the grid.
     Do not iterate over all the voxels in the grid, skip the voxels where the water in it 
@@ -541,20 +621,27 @@ class MapLogicNode(Node):
     """
     def update_free_space_in_fov(self, T_world_cam):
                 
-        # --- 1. Candidates Selection (Optimization) ---
+        # --- 1. Pre-Filter ---
         
-        # Check the voxels that are surely empty or full
-        indices_to_check = np.argwhere((self.grid > self.VAL_MIN) & (self.grid < self.VAL_LOCK))
+        # Get just the box where the frustum is, so that we only check those voxels
+        ix_min, ix_max, iy_min, iy_max, iz_min, iz_max = self.get_frustum_aabb(T_world_cam)
 
-        if len(indices_to_check) == 0:
-            return
-
-
-        # --- 2. Compute World Coordinates ---
+        # Extract the reduced grid
+        sub_grid = self.grid[ix_min:ix_max, iy_min:iy_max, iz_min:iz_max]
+        if sub_grid.size == 0: return
         
-        ix = indices_to_check[:, 0]
-        iy = indices_to_check[:, 1]
-        iz = indices_to_check[:, 2]
+        # Check for the candidates only in that grid
+        local_indices = np.argwhere((sub_grid > self.VAL_MIN) & (sub_grid < self.VAL_LOCK))
+        if len(local_indices) == 0: return
+
+
+        # Compute World Coordinates 
+        ix = local_indices[:, 0] + ix_min
+        iy = local_indices[:, 1] + iy_min
+        iz = local_indices[:, 2] + iz_min
+        
+        
+        # --- 2. Geometric Check
 
         pts_x = self.WS_BOUNDS['x'][0] + (ix + 0.5) * self.res_x
         pts_y = self.WS_BOUNDS['y'][0] + (iy + 0.5) * self.res_y
@@ -564,8 +651,7 @@ class MapLogicNode(Node):
         pts_world = np.column_stack((pts_x, pts_y, pts_z, np.ones_like(pts_x)))
 
 
-        # --- 3. Projection to Camera Frame ---
-        
+        # Projection to Camera Frame
         # Take the transformation matrix from the input arguments
         T_cam_world = np.linalg.inv(T_world_cam)
         
@@ -576,38 +662,32 @@ class MapLogicNode(Node):
         z_c = pts_cam[:, 2]
 
 
-        # --- 4. Frustum Geometry ---
-        
-        # Values for the frustum
+        # --- 4. Frustum Geometry Check ---
+
         tan_h = np.tan(self.FOV_H / 2.0)
         tan_v = np.tan(self.FOV_V / 2.0)
 
-        # Geometric Mask (in distance range and FOV range)
         mask_fov = (z_c > 0.05) & (z_c < self.MAX_DEPTH) & \
                    (np.abs(x_c) < (z_c * tan_h)) & \
                    (np.abs(y_c) < (z_c * tan_v))
-
+                   
+        valid_indices_mask = mask_fov
+        
 
         # --- 5. Water Bucket Analogy Application ---
         
-        # Filter the indexes with the mask
-        valid_indices = indices_to_check[mask_fov]
-
-        if len(valid_indices) > 0:
+        if np.any(valid_indices_mask):
             
-            # Take single valid indexes coordinates
-            v_ix = valid_indices[:, 0]
-            v_iy = valid_indices[:, 1]
-            v_iz = valid_indices[:, 2]
-
-            # Take current water values for each voxel
-            current_vals = self.grid[v_ix, v_iy, v_iz]
-
-            # Subtraction: make water evaporate if voxel is seen empty
-            new_vals = current_vals - self.MISS_DEC
-
-            # Clamp to VAL_MIN (0)
-            self.grid[v_ix, v_iy, v_iz] = np.clip(new_vals, self.VAL_MIN, self.VAL_MAX)
+            # Filters valid global indexes
+            final_ix = ix[valid_indices_mask]
+            final_iy = iy[valid_indices_mask]
+            final_iz = iz[valid_indices_mask]
+            
+            # Update valori
+            current_vals = self.grid[final_ix, final_iy, final_iz]
+            new_vals = np.clip(current_vals - self.MISS_DEC, self.VAL_MIN, self.VAL_MAX)
+            
+            self.grid[final_ix, final_iy, final_iz] = new_vals
             
 
     """
