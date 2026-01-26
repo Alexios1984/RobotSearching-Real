@@ -336,38 +336,68 @@ class MapLogicNode(Node):
         
         # --- 6. Filter Isolated Points ---
         
-        radius = 0.02          # If there is a point in a sphere of 2 cm radius with few neighbors, then it is just noise
-        min_neighbors = 6      # Minimum number of neighbors to be considered a real point
+        # radius = 0.02          # If there is a point in a sphere of 2 cm radius with few neighbors, then it is just noise
+        # min_neighbors = 6      # Minimum number of neighbors to be considered a real point
 
-        # Point is noise
-        if len(valid_points) >= min_neighbors:
+        # # Point is noise
+        # if len(valid_points) >= min_neighbors:
             
-            # Create a KD-tree for efficient nearest neighbor searches
-            tree = cKDTree(valid_points)                
+        #     # Create a KD-tree for efficient nearest neighbor searches
+        #     tree = cKDTree(valid_points)                
 
-            # Query the KD-tree for the k-th nearest neighbor within the specified radius
-            dists, _ = tree.query(                      
-                valid_points,   
-                k=min_neighbors, 
-                distance_upper_bound=radius
-            ) 
+        #     # Query the KD-tree for the k-th nearest neighbor within the specified radius
+        #     dists, _ = tree.query(                      
+        #         valid_points,   
+        #         k=min_neighbors, 
+        #         distance_upper_bound=radius
+        #     ) 
             
-            mask_clean = dists[:, -1] != float('inf')   # Create a mask to identify points that have at least 'min_neighbors' within 'radius'
+        #     mask_clean = dists[:, -1] != float('inf')   # Create a mask to identify points that have at least 'min_neighbors' within 'radius'
 
-            """
-            `dists` is an array of distances to the `k` nearest neighbors for each point in `valid_points`. If a point has fewer than `k` 
-            neighbors within `distance_upper_bound`, the remaining distances for that point will be `inf`.
+        #     """
+        #     `dists` is an array of distances to the `k` nearest neighbors for each point in `valid_points`. If a point has fewer than `k` 
+        #     neighbors within `distance_upper_bound`, the remaining distances for that point will be `inf`.
 
-            In the context of the provided code, `dists[:, -1]` is used to check the distance to the `k`-th nearest neighbor. 
-            If this distance is `inf`, it means the point does not have `k` neighbors within the specified `radius`, and thus it's considered 
-            an isolated point (noise).
-            """
+        #     In the context of the provided code, `dists[:, -1]` is used to check the distance to the `k`-th nearest neighbor. 
+        #     If this distance is `inf`, it means the point does not have `k` neighbors within the specified `radius`, and thus it's considered 
+        #     an isolated point (noise).
+        #     """
                    
-            valid_points = valid_points[mask_clean]
+        #     valid_points = valid_points[mask_clean]
+
+        # if valid_points.shape[0] == 0:
+        #     return
+        
+        min_points_per_voxel = 10         # Minimun number of points to be in a voxel to be considered occupied, otherwise it's just noise
+        
+        res_filter = self.res_x         # Resolution of the map (can be decreased to have a better resolution)
+
+        # Compute the indexes for the points of the pointcloud, this is the new method of distance computation. The voxel indexes are compared instead of euclidean distance computation 
+        ix_f = ((valid_points[:, 0] - x_min) / res_filter).astype(int)
+        iy_f = ((valid_points[:, 1] - y_min) / res_filter).astype(int)
+        iz_f = ((valid_points[:, 2] - z_min) / res_filter).astype(int)
+        
+        # Create a matrix with these
+        voxel_keys = np.column_stack((ix_f, iy_f, iz_f))
+        
+        # Counts the number of times the same voxel contains a point 
+        _, inverse_indices, counts = np.unique(
+            voxel_keys,                             # Check this matrix
+            axis=0,                                 # Compare triplets: (ix, iy, iz)
+            return_inverse=True,                    # Returns an array as long as the original matrix (number of voxels) 
+            return_counts=True                      # Returns the count for the unique voxel occurrencies
+        ) 
+        
+        # Mask for the voxels with a minimum number of points
+        mask_keep = counts[inverse_indices] >= min_points_per_voxel
+
+        # Mask applied
+        valid_points = valid_points[mask_keep]
 
         if valid_points.shape[0] == 0:
-            return
-
+            return     
+        
+        
         # --- 7. Debug Visualization ---
         
         debug_header = Header()
