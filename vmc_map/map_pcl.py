@@ -145,9 +145,13 @@ class MapLogicNode(Node):
         self.DEADLOCK_MIN_DIST = 0.40                   # Minimum distance from last deadlock to pick a new target (for avoiding stucking again in the same area)
         self.last_deadlock_pos = None                   # Last deadlock target coordinates
         
+        
         self.last_moving_time = time.time()             # Last time we moved (used to compute the time spent in a configuration)
+        
         self.last_discovery_check_time = time.time()    # Last time we checked for discovery rate
-        self.DISCOVERY_CHECK_INTERVAL = 5.0             # Interval between discovery rate checks (seconds)
+        self.DISCOVERY_CHECK_INTERVAL = 2.0             # Interval between discovery rate checks (seconds)
+        self.MIN_DISCOVERY_RATE = 0.1                   # Minimum discovery rate (new unknown voxels per second) to consider that we are moving
+        
         self.is_deadlocked = False                      # Flag for the deadlock
         
         self.ignored_targets = set()                    # Set for the ignored target voxels
@@ -155,7 +159,11 @@ class MapLogicNode(Node):
 
         self.ignored_zones = []                         # List of ignored zones
 
-
+        # Check the initial number of unknown voxels for the discovery rate
+        mask_initial_unknown = (self.grid >= self.VAL_FREE) & (self.grid <= self.VAL_OCCUPIED)
+        self.unknown_count_last_check = np.count_nonzero(mask_initial_unknown)
+        
+        
         # ============================
         # --- Subscribers ---
         # ============================
@@ -255,16 +263,33 @@ class MapLogicNode(Node):
             self.check_and_liberate_zones()
             
             
+            # --------------------------------------
             # --- Discovery Rate Check ---
+            # --------------------------------------
             
-            time_since_last_move = time.time() - self.last_discovery_check_time
+            dt_check = time.time() - self.last_discovery_check_time
             
-            if time_since_last_move > self.DISCOVERY_CHECK_INTERVAL:
+            if dt_check > self.DISCOVERY_CHECK_INTERVAL:
                 
-                r
+                mask_unknown = (self.grid > self.VAL_FREE) & (self.grid < self.VAL_OCCUPIED)
+                current_unknown_count = np.sum(mask_unknown)
+                
+                voxels_discovered = self.unknown_count_last_check - current_unknown_count
+                
+                discovery_rate = (voxels_discovered / dt_check) / max(1, current_unknown_count)
+                
+                if self.current_target_idx is not None and current_unknown_count > 0:
+                    
+                    if discovery_rate < self.MIN_DISCOVERY_RATE:
+                        self.is_deadlocked = True
+                
+                # 5. Aggiorna lo stato per il prossimo giro
+                self.last_discovery_check_time = time.time()
+                self.unknown_count_last_check = current_unknown_count
             
-            
+            # --------------------------------------
             # --- Deadlock Management ---
+            # --------------------------------------
             
             if self.is_deadlocked:
                 
@@ -295,7 +320,9 @@ class MapLogicNode(Node):
                 return 
                 
                 
+            # --------------------------------------
             # --- Check Present Target ---
+            # --------------------------------------
             
             # Check if the current target voxel has been "resolved" (seen as free or occupied). If so, search for a new target
             if curr_idx is not None:
@@ -317,7 +344,9 @@ class MapLogicNode(Node):
                     return
             
             
+            # --------------------------------------
             # --- Select New Target ---
+            # --------------------------------------
             
             # If we get here means that we do not have a target and we need to find one.
             # Search now a new one calling the ad-hoc function 
@@ -517,7 +546,7 @@ class MapLogicNode(Node):
     """
     def find_best_unknown_target(self, robot_pos, allow_risky_skin=False):
         
-        SELECTION_TRESHOLD = self.VAL_FREE + 15
+        SELECTION_TRESHOLD = self.VAL_FREE + 50     # Hysteresis Threshold for candidate selection
         
         
         # --- 1. Candidate Selection (with hysteresis) ---
