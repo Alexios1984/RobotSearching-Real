@@ -142,8 +142,8 @@ add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_att
 
 add_coordinate!(vms, CoordDifference("target_attractor", ".robot.camera_nose"); id="cam_to_target_error")
 
-add_component!(vms, TanhSpring("cam_to_target_error"; max_force=12.0, stiffness=200.0); id="attraction_spring")
-add_component!(vms, LinearDamper(7.0 * identity(3), "cam_to_target_error"); id="attraction_damper")
+add_component!(vms, TanhSpring("cam_to_target_error"; max_force=15.0, stiffness=200.0); id="attraction_spring")
+add_component!(vms, LinearDamper(10.0 * identity(3), "cam_to_target_error"); id="attraction_damper")
 
 
 # --- Obstacle Repulsors for Camera ---
@@ -159,7 +159,7 @@ for i in 1:N_REPULSORS
     add_coordinate!(vms, CoordDifference(rep_id, ".robot.camera_position"); id=err_id)
     
     # Camera Repulsion Spring
-    add_component!(vms, GaussianSpring(err_id; max_force=-15.0, width=0.08); id="repulsor_spring_$i")
+    add_component!(vms, GaussianSpring(err_id; max_force=-10.0, width=0.1); id="repulsor_spring_$i")
 end
 
 
@@ -718,4 +718,3 @@ qᵛ = Float64[]
 ros_vm_controller(cvms, qᵛ; f_control, f_setup, E_max=30.0)
 
 
-# Initial configuration [0.0305, -0.0428, 1.6126, 0.8134, -1.0366, -2.3703, -0.0245]

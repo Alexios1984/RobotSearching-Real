@@ -59,15 +59,11 @@ def generate_launch_description():
         [startup_pkg_share, 'config', 'rviz2_config.rviz']
     )
 
-    rviz_video_config_file = PathJoinSubstitution(
-        [startup_pkg_share, 'config', 'rviz2_config_video.rviz']
-    )
-
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', rviz_video_config_file], 
+        arguments=['-d', rviz_config_file], 
         output='screen'
     )
 

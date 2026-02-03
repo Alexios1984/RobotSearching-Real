@@ -8,7 +8,7 @@ import time
 # ROS 2 Messages
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Int32
 
 class DepthVisionNode(Node):
     
@@ -26,9 +26,9 @@ class DepthVisionNode(Node):
         # ==========================
         
         self.min_dist = 0.07            # Minimum distance to consider for detected obstacles (minimum distance Realsense)
-        self.max_dist = 0.60            # Maximum distance to consider for detected obstacles (maximum distances Realsense)
+        self.max_dist = 0.50            # Maximum distance to consider for detected obstacles (maximum distances Realsense)
         self.depth_scale = 0.001        # RealSense default (mm -> m)
-        self.decimation = 20            # Skip factor for trivially downsampling the depth image
+        self.decimation = 5             # Skip factor for trivially downsampling the depth image
         self.camera_info = None
 
         # ==========================
@@ -37,23 +37,33 @@ class DepthVisionNode(Node):
         
         # -- Subscribers --
         
-        self.sub_info = self.create_subscription(
+        self.sub_info = self.create_subscription(       # Subscriber to the colored image
             CameraInfo, 
             'camera/camera/aligned_depth_to_color/camera_info', 
             self.cb_info, 
             10
         )
         
-        self.sub_depth = self.create_subscription(
+        self.sub_depth = self.create_subscription(      # Subscriber to the depth info
             Image, 
             '/camera/camera/aligned_depth_to_color/image_raw', 
             self.cb_depth, 
             10
         )
         
-        # -- Publisher --
+        # -- Publishers --
         
-        self.pub_pcl = self.create_publisher(PointCloud2, '/vision/obstacle_cloud', 10)
+        self.pub_pcl = self.create_publisher(           # Publisher of the Pointcloud
+            PointCloud2, 
+            '/vision/obstacle_cloud', 
+            10
+        )
+        
+        self.pub_count = self.create_publisher(
+            Int32,
+            '/vision/point_count',
+            10
+        )
 
         # Logging
         self.get_logger().info(f"Depth Node Ready! Range: {self.min_dist}-{self.max_dist}m")
@@ -122,6 +132,9 @@ class DepthVisionNode(Node):
         
         # Publish the cleaned pointcloud
         self.pub_pcl.publish(pcl_msg)
+
+        # Publish the count of the points sent
+        self.pub_count.publish(Int32(data=points_3d.shape[0])) 
 
 def main(args=None):
     rclpy.init(args=args)

@@ -50,12 +50,12 @@ class MapLogicNode(Node):
         # ==============================
         
         self.WS_BOUNDS = {                  # Definition of the global limits (World Frame)
-            'x': [-0.2, 0.5],   
-            'y': [ 0.45, 0.9],
-            'z': [ 0.2, 0.85]
+            'x': [-0.4, 0.55],   
+            'y': [ 0.4, 1.15],
+            'z': [ 0.05, 0.8]
         }
 
-        self.TARGET_VOXEL_SIZE = 0.06             # Voxel size in meters
+        self.TARGET_VOXEL_SIZE = 0.05             # Voxel size in meters
         
         # Dimensions of the workspace
         self.dim_x = self.WS_BOUNDS['x'][1] - self.WS_BOUNDS['x'][0]
@@ -89,17 +89,17 @@ class MapLogicNode(Node):
         # --- Bucket Tresholds ---
         
         self.VAL_MIN = 0                    # Empty bucket
-        self.VAL_MAX = 100                  # Full bucket
+        self.VAL_MAX = 300                  # Full bucket
         self.VAL_UNKNOWN = 50               # Default uncertainty level
-        self.VAL_OCCUPIED = 80              # Min Threshold to say "It's occupied!"
+        self.VAL_OCCUPIED = 90              # Min Threshold to say "It's occupied!"
         self.VAL_FREE = 20                  # Max Threshold to say "It's free for sure"
-        self.VAL_LOCK = self.VAL_MAX        # Once full, we don't decrease it anymore (for stability)
+        self.VAL_LOCK = 300        # Once full, we don't decrease it anymore (for stability)
         
         
         # --- Bucket Quantities ---
         
-        self.HIT_INC = 20                   # How much water we add if we see an obstacle (Rapid Increment)
-        self.MISS_DEC = 10                  # How much water we lose if we see free space (Slow Decay)
+        self.HIT_INC = 20                  # How much water we add if we see an obstacle (Rapid Increment)
+        self.MISS_DEC = 5                   # How much water we lose if we see free space (Slow Decay)
 
 
         # --- Voxel Grid Initialization --- 
@@ -121,7 +121,7 @@ class MapLogicNode(Node):
 
         # --- Logic Configuration ---
         
-        self.MAX_OBSTACLES = 100                        # Max number of repulsors to consider (for performance). Selected among the points of the point cloud.
+        self.MAX_OBSTACLES = 5                        # Max number of repulsors to consider (for performance). Selected among the points of the point cloud.
 
         self.latest_cam_pose = None                     # Latest Camera Pose (from Robot State)
         
@@ -130,6 +130,8 @@ class MapLogicNode(Node):
         self.cb_group = ReentrantCallbackGroup()        # Lock for the group where all can access at the same time (for parallelization). The default group is the MutuallyExsclusiveCallbackGroup that means that just one per time can be executed
 
         self.min_distance_rep = 0.10                    # Minimum distance between repulsors 
+
+        self.min_points_per_voxel = 20                  # Minimun number of points to be in a voxel to be considered occupied, otherwise it's just noise
         
         # --- Deadlock Configuration ---
         
@@ -336,40 +338,6 @@ class MapLogicNode(Node):
         
         # --- 6. Filter Isolated Points ---
         
-        # radius = 0.02          # If there is a point in a sphere of 2 cm radius with few neighbors, then it is just noise
-        # min_neighbors = 6      # Minimum number of neighbors to be considered a real point
-
-        # # Point is noise
-        # if len(valid_points) >= min_neighbors:
-            
-        #     # Create a KD-tree for efficient nearest neighbor searches
-        #     tree = cKDTree(valid_points)                
-
-        #     # Query the KD-tree for the k-th nearest neighbor within the specified radius
-        #     dists, _ = tree.query(                      
-        #         valid_points,   
-        #         k=min_neighbors, 
-        #         distance_upper_bound=radius
-        #     ) 
-            
-        #     mask_clean = dists[:, -1] != float('inf')   # Create a mask to identify points that have at least 'min_neighbors' within 'radius'
-
-        #     """
-        #     `dists` is an array of distances to the `k` nearest neighbors for each point in `valid_points`. If a point has fewer than `k` 
-        #     neighbors within `distance_upper_bound`, the remaining distances for that point will be `inf`.
-
-        #     In the context of the provided code, `dists[:, -1]` is used to check the distance to the `k`-th nearest neighbor. 
-        #     If this distance is `inf`, it means the point does not have `k` neighbors within the specified `radius`, and thus it's considered 
-        #     an isolated point (noise).
-        #     """
-                   
-        #     valid_points = valid_points[mask_clean]
-
-        # if valid_points.shape[0] == 0:
-        #     return
-        
-        min_points_per_voxel = 10         # Minimun number of points to be in a voxel to be considered occupied, otherwise it's just noise
-        
         res_filter = self.res_x         # Resolution of the map (can be decreased to have a better resolution)
 
         # Compute the indexes for the points of the pointcloud, this is the new method of distance computation. The voxel indexes are compared instead of euclidean distance computation 
@@ -389,7 +357,7 @@ class MapLogicNode(Node):
         ) 
         
         # Mask for the voxels with a minimum number of points
-        mask_keep = counts[inverse_indices] >= min_points_per_voxel
+        mask_keep = counts[inverse_indices] >= self.min_points_per_voxel
 
         # Mask applied
         valid_points = valid_points[mask_keep]
@@ -440,8 +408,8 @@ class MapLogicNode(Node):
         current_vals = self.grid[uix, uiy, uiz]
         new_vals = current_vals + self.HIT_INC
         
-        # Ensure values stay within the defined range [VAL_MIN, VAL_LOCK]
-        new_vals = np.clip(new_vals, self.VAL_MIN, self.VAL_LOCK)
+        # Ensure values stay within the defined range 
+        new_vals = np.clip(new_vals, self.VAL_MIN, self.VAL_MAX)
         
         # Update the grid
         self.grid[uix, uiy, uiz] = new_vals
@@ -522,7 +490,7 @@ class MapLogicNode(Node):
             val = self.grid[x, y, z]
             
             # If this is unknown, then it will be ignored, otherwise we skip it
-            if val >= self.VAL_FREE and val <= self.VAL_OCCUPIED:
+            if val > self.VAL_FREE and val < self.VAL_OCCUPIED:
                 indices_to_ignore.append((int(x), int(y), int(z)))
 
         # Create the zone and append it to the ignore_zones array
@@ -722,13 +690,13 @@ class MapLogicNode(Node):
         # c_free = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.05) 
         
         # Occupied: Red
-        c_occupied = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.9) 
+        c_occupied = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0) 
         
         # Target: Yellow
         c_target   = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
 
         # Ignored: Blue
-        c_ignored = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.6)
+        c_ignored = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.1)
 
 
         # --- 1. Unknown Space---
@@ -1364,7 +1332,7 @@ class MapLogicNode(Node):
         points = np.column_stack((points_x, points_y, points_z))
         
         
-        # --- Spatial Hashing ---
+        # --- 1. Spatial Hashing ---
         
         keys = np.floor(points / self.min_distance_rep).astype(int)
         
@@ -1381,8 +1349,39 @@ class MapLogicNode(Node):
             if k not in unique_obstacles:
                 unique_obstacles[k] = points[i]
         
-        # Restituisce solo i punti filtrati
-        return list(unique_obstacles.values())
+        # List of spatially distributed obstacles
+        sparse_obstacles = list(unique_obstacles.values())
+
+        # --- 2. Distance Sorting & Limiting ---
+
+        # If we have more obstacles than allowed, we prioritize the closest ones
+        if len(sparse_obstacles) > self.MAX_OBSTACLES:
+            
+            # We need the robot position to compute distances
+            if self.latest_cam_pose is not None:
+                robot_pos = self.latest_cam_pose['pos']
+                
+                # Convert to numpy for fast vectorized math
+                obs_array = np.array(sparse_obstacles)
+                
+                # Compute Euclidean distances from robot/camera
+                dists = np.linalg.norm(obs_array - robot_pos, axis=1)
+                
+                # Get the indices that would sort the array by distance
+                sorted_indices = np.argsort(dists)
+                
+                # Take only the top MAX_OBSTACLES indices
+                top_indices = sorted_indices[:self.MAX_OBSTACLES]
+                
+                # Return the subset
+                return obs_array[top_indices].tolist()
+            
+            else:
+                # Fallback if pose is unknown: just cut the list arbitrarily
+                return sparse_obstacles[:self.MAX_OBSTACLES]
+
+        return sparse_obstacles
+
 
 
     """
