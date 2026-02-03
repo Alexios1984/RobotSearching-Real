@@ -48,16 +48,16 @@ end
 const N_REPULSORS = 100             # Number of obstacle repulsors distributed on the objects
 
 const COLLISION_LINKS =[            # Links to consider for collision avoidance
-        "fr3_link0",
-        "fr3_link1",
-        "fr3_link2",
-        "fr3_link3",
-        "fr3_link4",
-        "fr3_link5",
-        "fr3_link6",
-        "fr3_link7",
-        "fr3_hand_tcp"
+        "fr3_hand_tcp", 
+        "fr3_link7", 
+        "fr3_link6", 
+        "fr3_link5", 
+        "fr3_link4", 
+        "fr3_link3", 
+        "fr3_link2", 
+        "fr3_link1"
 ]
+
 
 const DESIRED_JOINT_ORDER = [       # Desired joint order for state array
         "fr3_joint1",
@@ -67,6 +67,12 @@ const DESIRED_JOINT_ORDER = [       # Desired joint order for state array
         "fr3_joint5",
         "fr3_joint6",
         "fr3_joint7"
+]
+
+const IGNORED_FLOOR_LINKS = [       # Links to ignore for collision avoidance (e.g., floor) 
+    "fr3_link0", 
+    "fr3_link1", 
+    "fr3_link2"
 ]
 
 const DIST_NOSE = 0.25              # Distance from camera frame to nose point along Z axis
@@ -164,7 +170,7 @@ end
 
 
 
-# --- Obstacle Repulsors for Body ---
+# --- Obstacle Repulsors for Body (Floor + Obstacles) ---
 
 for link_name in COLLISION_LINKS
 
@@ -180,6 +186,18 @@ for link_name in COLLISION_LINKS
         # Body Repulsion Spring
         sping_id = "$(link_name)_link_repulsor_spring_$i"
         add_component!(vms, GaussianSpring(error; max_force=-15.0, width=0.08); id=sping_id)
+    end
+
+    # Repulsor on each link for FLOOR
+    shadow_id = "floor_shadow_$(link_name)"
+
+    add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.0, 0.0, FLOOR_Z_LEVEL))); id=shadow_id)
+
+    floor_error_id = "floor_error_$(link_name)"
+    add_coordinate!(vms, CoordDifference(shadow_id, ".robot.$(link_name)_pos"); id=floor_error_id)
+
+    if !(link_name in IGNORED_FLOOR_LINKS)
+        add_component!(vms, GaussianSpring(floor_error_id; max_force=-15.0, width=0.05); id="FloorSpring_$(link_name)")
     end
 
 end
@@ -202,30 +220,32 @@ function f_setup(cache)
     cam_frame_id = get_compiled_frameID(cache, ".robot.camera_frame")
 
 
-    # --- Link Coordinates for Velocity Check ---
-
-    link_names = [
-        "fr3_hand_tcp", "fr3_link7", "fr3_link6", "fr3_link5", 
-        "fr3_link4", "fr3_link3", "fr3_link2", "fr3_link1"
-    ]
+    # --- Link Coordinates for Velocity Check & Floor Repulsion ---
 
     link_coords_ids = []
+    floor_repulsor_ids = String[]
 
-    for name in link_names
+    for name in COLLISION_LINKS
         try
+            shadow_id = "floor_shadow_$(name)"
+            push!(floor_repulsor_ids, shadow_id)
+            
             cid = get_compiled_coordID(cache, ".robot.$(name)_pos")
             push!(link_coords_ids, cid)
         catch
             println("Warning: Coordinate for $name not found, skipping velocity check.")
         end
     end
+
+    floor_repulsors_handle = [cache[get_compiled_coordID(cache, fl_rep_id)].coord_data.val for fl_rep_id in floor_repulsor_ids]
+
     
-    return (target_id, repulsor_ids, cam_frame_id, link_coords_ids)
+    return (target_id, repulsor_ids, cam_frame_id, link_coords_ids, floor_repulsors_handle)
 end
 
 function f_control(cache, t, args, dt)
 
-    (target_id, repulsor_ids, _, _) = args
+    (target_id, repulsor_ids, _, _, floor_repulsors_handle) = args
 
     # Non-blocking check for new target data
     if isready(target_channel)
@@ -256,6 +276,16 @@ function f_control(cache, t, args, dt)
             else
                 cache[repulsor_ids[i]].coord_data.val[] = SVector(99.0, 99.0, 99.0)
             end
+        end
+
+        # --- Update Floor Repulsors Positions ---
+
+        for (i, link_compiled_coord_id) in enumerate(link_coords_ids)
+
+            link_pos = configuration(cache, link_compiled_coord_id)
+
+            floor_repulsors_handle[i][] = SVector(link_pos[1], link_pos[2], FLOOR_Z_LEVEL)
+
         end
 
     end
