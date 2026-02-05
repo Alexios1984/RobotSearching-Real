@@ -50,10 +50,16 @@ class MapLogicNode(Node):
         # ==============================
         
         self.WS_BOUNDS = {                  # Definition of the global limits (World Frame)
-            'x': [-0.4, 0.55],   
-            'y': [ 0.4, 1.15],
-            'z': [ 0.05, 0.8]
+            'x': [-0.15, 0.44],   
+            'y': [ 0.68, 1.18],
+            'z': [ 0.01, 0.8]
         }
+
+        # self.WS_BOUNDS = {                  # Definition of the global limits (World Frame)
+        #     'x': [-0.25, 0.55],   
+        #     'y': [ 0.55, 1.2],
+        #     'z': [ 0.01, 1.1]
+        # }
 
         self.TARGET_VOXEL_SIZE = 0.05             # Voxel size in meters
         
@@ -121,7 +127,7 @@ class MapLogicNode(Node):
 
         # --- Logic Configuration ---
         
-        self.MAX_OBSTACLES = 5                        # Max number of repulsors to consider (for performance). Selected among the points of the point cloud.
+        self.MAX_OBSTACLES = 50                        # Max number of repulsors to consider (for performance). Selected among the points of the point cloud.
 
         self.latest_cam_pose = None                     # Latest Camera Pose (from Robot State)
         
@@ -546,7 +552,7 @@ class MapLogicNode(Node):
     """
     def find_best_unknown_target(self, robot_pos, allow_risky_skin=False):
         
-        SELECTION_TRESHOLD = self.VAL_FREE + 50     # Hysteresis Threshold for candidate selection
+        SELECTION_TRESHOLD = self.VAL_FREE + 15     # Hysteresis Threshold for candidate selection
         
         
         # --- 1. Candidate Selection (with hysteresis) ---
@@ -701,14 +707,14 @@ class MapLogicNode(Node):
             # 3.0 Frontality
             # 2.0 Relevance  
             # 1.0 Distance   
-            score = (3.0 * norm_frontality) + (2.0 * norm_relevance) + (1.0 * norm_dist_score)
+            score = (0.7 * norm_frontality) + (2.0 * norm_relevance) + (1.0 * norm_dist_score)
             
             if score > best_score:
                 best_score = score
                 best_idx = tuple(idx)
 
+        print("\n", best_idx)
         return best_idx
-
     
     
     """

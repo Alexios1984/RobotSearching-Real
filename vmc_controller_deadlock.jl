@@ -75,6 +75,26 @@ const IGNORED_FLOOR_LINKS = [       # Links to ignore for collision avoidance (e
     "fr3_link2"
 ]
 
+const EXTRA_POINTS_CONFIG = [       # Extra points on the robot to be repulsed for improved precision in holes passing
+    # Link 5
+    ("fr3_link5", SVector(0.0, 0.11, 0.0),    "coll_L5_front"),
+    ("fr3_link5", SVector(0.0, 0.11, -0.11),  "coll_L5_corner"),
+    ("fr3_link5", SVector(0.0, 0.0, -0.22),   "coll_L5_back"),
+    
+    # Link 3
+    ("fr3_link3", SVector(0.09, 0.09, 0.01),  "coll_L3_sideA"),
+    ("fr3_link3", SVector(0.09, -0.09, 0.01), "coll_L3_sideB"),
+    
+    # Link 7
+    ("fr3_link7", SVector(0.0, 0.0, -0.06),   "coll_L7_back"),
+    
+    # Hand TCP
+    ("fr3_hand_tcp", SVector(0.0, 0.08, -0.07), "coll_HAND_left"),
+    ("fr3_hand_tcp", SVector(0.0, -0.08, -0.07),"coll_HAND_right")
+]
+const TOTAL_COLLISION_FRAMES = vcat(COLLISION_LINKS, [cfg[3] for cfg in EXTRA_POINTS_CONFIG])
+
+
 const DIST_NOSE = 0.25              # Distance from camera frame to nose point along Z axis
 
 const CAMERA_OFFSET = Transform(    # Camera mounted on the robot's end-effector has a fixed offset
@@ -82,7 +102,9 @@ const CAMERA_OFFSET = Transform(    # Camera mounted on the robot's end-effector
     Rotor(RotZ(pi/2))
 ) 
 
-const verbose = false               # Flag to activate the verbose prints               
+const verbose = false               # Flag to activate the verbose prints    
+
+const FLOOR_Z_LEVEL = 0.01          # Height at which the floor is supposed to be
 
 
 # --- Shared Channels for Communication ---
@@ -105,18 +127,18 @@ robot = parseURDF(joinpath(module_path, "URDFs/franka_description/urdfs/fr3_fran
 
 add_gravity_compensation!(robot, VMRobotControl.DEFAULT_GRAVITY)
 
-# joint_limits = cfg.joint_limits
-#     for (i, τ_coulomb) in zip(1:7, [5.0, 5.0, 5.0, 5.0, 3.0, 3.0, 3.0])
-#         jname = "fr3_joint$i"
-#         cid = "J$i"
-#         add_coordinate!(robot, JointSubspace(jname); id=cid)
-#         limits = joint_limits[jname]
-#         if !isnothing(limits) && !isnothing(limits.lower) && !isnothing(limits.upper)
-#             add_deadzone_springs!(robot, 80.0, (limits.lower+0.1, limits.upper-0.1), cid)
-#         end
-#         add_component!(robot, TanhDamper(τ_coulomb, 1e-1, cid); id="JDamp$i")
-#         # add_component!(robot, LinearDamper(3.0, cid); id="ViscousDamp$i")
-#     end
+joint_limits = cfg.joint_limits
+for (i, τ_coulomb) in zip(1:7, [5.0, 5.0, 5.0, 5.0, 3.0, 3.0, 3.0])
+    jname = "fr3_joint$i"
+    cid = "J$i"
+    add_coordinate!(robot, JointSubspace(jname); id=cid)
+    limits = joint_limits[jname]
+    if !isnothing(limits) && !isnothing(limits.lower) && !isnothing(limits.upper)
+        add_deadzone_springs!(robot, 80.0, (limits.lower+0.1, limits.upper-0.1), cid)
+    end
+    add_component!(robot, TanhDamper(τ_coulomb, 1e-1, cid); id="JDamp$i")
+    add_component!(robot, LinearDamper(3.0, cid); id="ViscousDamp$i")
+end
 
 
 # -- Virtual Mechanism System --
@@ -148,7 +170,7 @@ add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_att
 
 add_coordinate!(vms, CoordDifference("target_attractor", ".robot.camera_nose"); id="cam_to_target_error")
 
-add_component!(vms, TanhSpring("cam_to_target_error"; max_force=15.0, stiffness=200.0); id="attraction_spring")
+add_component!(vms, TanhSpring("cam_to_target_error"; max_force=20.0, stiffness=200.0); id="attraction_spring")
 add_component!(vms, LinearDamper(10.0 * identity(3), "cam_to_target_error"); id="attraction_damper")
 
 
@@ -165,14 +187,19 @@ for i in 1:N_REPULSORS
     add_coordinate!(vms, CoordDifference(rep_id, ".robot.camera_position"); id=err_id)
     
     # Camera Repulsion Spring
-    add_component!(vms, GaussianSpring(err_id; max_force=-10.0, width=0.1); id="repulsor_spring_$i")
+    add_component!(vms, GaussianSpring(err_id; max_force=-10.0, width=0.04); id="repulsor_spring_$i")
 end
 
 
+# Creation of virtual frames for additional collision points
+for (parent, offset, fname) in EXTRA_POINTS_CONFIG
+    add_frame!(robot, fname)
+    add_joint!(robot, Rigid(Transform(offset)); parent=parent, child=fname, id="J_Fix_$(fname)")
+end
 
 # --- Obstacle Repulsors for Body (Floor + Obstacles) ---
 
-for link_name in COLLISION_LINKS
+for link_name in TOTAL_COLLISION_FRAMES
 
     add_coordinate!(robot, FrameOrigin(link_name); id="$(link_name)_pos")
 
@@ -185,7 +212,7 @@ for link_name in COLLISION_LINKS
 
         # Body Repulsion Spring
         sping_id = "$(link_name)_link_repulsor_spring_$i"
-        add_component!(vms, GaussianSpring(error; max_force=-15.0, width=0.08); id=sping_id)
+        add_component!(vms, GaussianSpring(error; max_force=-10.0, width=0.04); id=sping_id)
     end
 
     # Repulsor on each link for FLOOR
@@ -197,7 +224,7 @@ for link_name in COLLISION_LINKS
     add_coordinate!(vms, CoordDifference(shadow_id, ".robot.$(link_name)_pos"); id=floor_error_id)
 
     if !(link_name in IGNORED_FLOOR_LINKS)
-        add_component!(vms, GaussianSpring(floor_error_id; max_force=-15.0, width=0.05); id="FloorSpring_$(link_name)")
+        add_component!(vms, GaussianSpring(floor_error_id; max_force=-20.0, width=0.05); id="FloorSpring_$(link_name)")
     end
 
 end
@@ -225,7 +252,7 @@ function f_setup(cache)
     link_coords_ids = []
     floor_repulsor_ids = String[]
 
-    for name in COLLISION_LINKS
+    for name in TOTAL_COLLISION_FRAMES
         try
             shadow_id = "floor_shadow_$(name)"
             push!(floor_repulsor_ids, shadow_id)
@@ -245,7 +272,7 @@ end
 
 function f_control(cache, t, args, dt)
 
-    (target_id, repulsor_ids, _, _, floor_repulsors_handle) = args
+    (target_id, repulsor_ids, _, link_coords_ids, floor_repulsors_handle) = args
 
     # Non-blocking check for new target data
     if isready(target_channel)
@@ -405,7 +432,7 @@ function ros_vm_controller(
         # --- Control Function ---
         
         control_func! = let control_cache=control_cache, args=args, node=node, 
-                            torque_publisher=torque_publisher, state_publisher=state_publisher,
+                            torque_publisher=torque_publisher, state_publisher=state_publisher, deadlock_pub=deadlock_pub,
                             cam_frame_id=cam_frame_id, link_coords_ids=link_coords_ids
             
             function control_func!(t, dt)
@@ -746,5 +773,3 @@ end
 cvms = compile(vms)
 qᵛ = Float64[]
 ros_vm_controller(cvms, qᵛ; f_control, f_setup, E_max=30.0)
-
-
