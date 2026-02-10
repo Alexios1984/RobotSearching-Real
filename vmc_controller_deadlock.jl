@@ -15,6 +15,75 @@ using FileIO, UUIDs, MeshIO
 using Dates
 using Rotations
 using Printf
+using JDL2
+
+# --- Logging ---
+
+# 1. Time
+time_log = Float64[]
+
+# 2. Robot State
+joint_pos_log = Vector{Float64}[]       # 
+joint_vel_log = Vector{Float64}[]       # 
+link_vel_log = Vector{Float64}[]        # 
+torques_log = Vector{Float64}[]         #
+tcp_pos_log = SVector{3, Float64}[]     # 
+cam_pos_log = SVector{3, Float64}[]     # 
+
+# 3. VMC State (Obstacles + Target)
+target_pos_log = SVector{3, Float64}[] # 
+obstacles_log = Vector{SVector{3, Float64}}[] 
+
+# 4. Attraction Forces
+force_attraction_spring = SVector{3, Float64}[] #
+force_attraction_damper = SVector{3, Float64}[] #
+
+# 5. Repulsion Forces from Guards
+fr3_hand_tcp_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+fr3_link7_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+fr3_link6_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+fr3_link5_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+fr3_link4_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+fr3_link3_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+fr3_link2_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+fr3_link1_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+
+coll_L5_front_repulsion_force  = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_L5_corner_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_L5_back_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_L3_sideA_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_L3_sideB_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_L7_back_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_HAND_left_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_HAND_right_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+left_finger_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+right_finger_repulsion_force = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+
+# 6. Floor Repulsion
+fr3_hand_tcp_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+fr3_link7_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+fr3_link6_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+fr3_link5_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+fr3_link4_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+fr3_link3_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+
+coll_L5_front_repulsion_force  = Vector{Tuple{SVector{3, Float64}, Float64}}[]
+coll_L5_corner_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+coll_L5_back_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+coll_L3_sideA_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+coll_L3_sideB_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+coll_L7_back_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+coll_HAND_left_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+coll_HAND_right_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+left_finger_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+right_finger_repulsion_floor = Tuple{SVector{3, Float64}, Float64}[]
+
+# 7. Components values for logging
+component_params_log = Dict{String, Any}()
+
+SAVE_DATA = false
+FILE_NAME = "RoboticMapping.jld2"
+
 
 # --- ROS 2 Python Modules ---
 
@@ -174,11 +243,17 @@ add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_att
 
 add_coordinate!(vms, CoordDifference("target_attractor", ".robot.camera_nose"); id="cam_to_target_error")
 
-add_component!(vms, TanhSpring("cam_to_target_error"; max_force=20.0, stiffness=200.0); id="attraction_spring")
-add_component!(vms, LinearDamper(12.0 * identity(3), "cam_to_target_error"); id="attraction_damper")
+CAM_TO_TARG_STIFF = 200.0
+CAM_TO_TARG_MAXFORCE = 20.0
+CAM_TO_TARG_DAMPING = 12.0
+add_component!(vms, TanhSpring("cam_to_target_error"; max_force=CAM_TO_TARG_MAXFORCE, stiffness=CAM_TO_TARG_STIFF); id="attraction_spring")
+add_component!(vms, LinearDamper(CAM_TO_TARG_DAMPING * identity(3), "cam_to_target_error"); id="attraction_damper")
 
 
 # --- Obstacle Repulsors for Camera ---
+
+const REPULSION_MAXFORCE = -10.0
+const REPULSION_WIDTH = 0.04
 
 for i in 1:N_REPULSORS
 
@@ -191,7 +266,7 @@ for i in 1:N_REPULSORS
     add_coordinate!(vms, CoordDifference(rep_id, ".robot.camera_position"); id=err_id)
     
     # Camera Repulsion Spring
-    add_component!(vms, GaussianSpring(err_id; max_force=-10.0, width=0.04); id="repulsor_spring_$i")
+    add_component!(vms, GaussianSpring(err_id; max_force=REPULSION_MAXFORCE, width=REPULSION_WIDTH); id="repulsor_spring_$i")
 end
 
 
@@ -202,6 +277,9 @@ for (parent, offset, fname) in EXTRA_POINTS_CONFIG
 end
 
 # --- Obstacle Repulsors for Body (Floor + Obstacles) ---
+
+const REPULSION_FLOOR_MAXFORCE = -20.0
+const REPULSION_FLOOR_WIDTH = 0.05
 
 for link_name in TOTAL_COLLISION_FRAMES
 
@@ -216,7 +294,7 @@ for link_name in TOTAL_COLLISION_FRAMES
 
         # Body Repulsion Spring
         sping_id = "$(link_name)_link_repulsor_spring_$i"
-        add_component!(vms, GaussianSpring(error; max_force=-10.0, width=0.04); id=sping_id)
+        add_component!(vms, GaussianSpring(error; max_force=REPULSION_MAXFORCE, width=REPULSION_WIDTH); id=sping_id)
     end
 
     # Repulsor on each link for FLOOR
@@ -228,14 +306,58 @@ for link_name in TOTAL_COLLISION_FRAMES
     add_coordinate!(vms, CoordDifference(shadow_id, ".robot.$(link_name)_pos"); id=floor_error_id)
 
     if !(link_name in IGNORED_FLOOR_LINKS)
-        add_component!(vms, GaussianSpring(floor_error_id; max_force=-20.0, width=0.05); id="FloorSpring_$(link_name)")
+        add_component!(vms, GaussianSpring(floor_error_id; max_force=REPULSION_FLOOR_MAXFORCE, width=REPULSION_FLOOR_WIDTH); id="FloorSpring_$(link_name)")
     end
 
 end
 
 println("✅ VMS Built.")
 
+# ==========================================
+# --- Logging Function for Components ---
+# ==========================================
 
+function extract_all_component_params(vms)
+
+    params_dict = Dict{String, Any}()
+    
+    p = Dict{String, Any}()
+    p[:type] = "TanhSpring"
+    p[:stiffness] = CAM_TO_TARG_STIFF
+    p[:maxforce] = CAM_TO_TARG_MAXFORCE
+
+    params_dict["Cam to Target Spring"] = p
+
+    # ----------------------------
+
+    p = Dict{String, Any}()
+    p[:type] = "TanhSpring"
+    p[:damping] = CAM_TO_TARG_DAMPING
+
+    params_dict["Cam to Target Damper"] = p
+
+    # ----------------------------
+
+    p = Dict{String, Any}()
+    p[:type] = "GaussianSpring"
+    p[:maxforce] = REPULSION_MAXFORCE
+    p[:width] = REPULSION_WIDTH
+
+    params_dict["Repulsion Guard Spring"] = p
+
+    # ----------------------------
+
+    p = Dict{String, Any}()
+    p[:type] = "GaussianSpring"
+    p[:maxforce] = REPULSION_FLOOR_MAXFORCE
+    p[:width] = REPULSION_FLOOR_WIDTH
+
+    params_dict["Repulsion Floor Spring"] = p
+
+    # ----------------------------
+
+    return params_dict
+end
 
 # ======================================
 # --- Control Logic Functions ---
@@ -250,6 +372,13 @@ function f_setup(cache)
     # Frame ID for Telemetry (to send pose to Python)
     cam_frame_id = get_compiled_frameID(cache, ".robot.camera_frame")
 
+    # Attraction Spring and Damper IDs
+    attraction_spring_id = get_compiled_componentID(cache, "attraction_spring")
+    attraction_damper_id = get_compiled_componentID(cache, "attraction_damper")
+    
+    # Coordinates for robot's pose
+    tcp_coord_id = get_compiled_coordID(cache, "TCP position")
+    cam_coord_id = get_compiled_coordID(cache, "camera_position")
 
     # --- Link Coordinates for Velocity Check & Floor Repulsion ---
 
@@ -271,12 +400,14 @@ function f_setup(cache)
     floor_repulsors_handle = [cache[get_compiled_coordID(cache, fl_rep_id)].coord_data.val for fl_rep_id in floor_repulsor_ids]
 
     
-    return (target_id, repulsor_ids, cam_frame_id, link_coords_ids, floor_repulsors_handle)
+    return (target_id, repulsor_ids, cam_frame_id, link_coords_ids, floor_repulsors_handle, 
+            attraction_spring_id, attraction_damper_id, tcp_coord_id, cam_coord_id)
 end
 
 function f_control(cache, t, args, dt)
 
-    (target_id, repulsor_ids, _, link_coords_ids, floor_repulsors_handle) = args
+    (target_id, repulsor_ids, cam_frame_id, link_coords_ids, floor_repulsors_handle, 
+            attraction_spring_id, attraction_damper_id, tcp_coord_id, cam_coord_id) = args
 
     # Non-blocking check for new target data
     if isready(target_channel)
@@ -319,6 +450,29 @@ function f_control(cache, t, args, dt)
 
         end
 
+
+        # ======================
+        # --- LOGGING ---
+        # ======================
+
+        # 1. Tempo
+        push!(time_log, t)
+
+        # 2. Posizione Target Attuale
+        current_target = cache[target_id].coord_data.val[]
+        push!(target_pos_log, current_target)
+
+        # 3. Posizione Reale (TCP e Camera nel VMC)
+        push!(tcp_pos_log, configuration(cache, tcp_coord_id))
+        push!(cam_pos_log, configuration(cache, cam_coord_id))
+
+        # 4. Forze (Usiamo _opspace_force come nell'esempio del tutor)
+        f_spring = VMRobotControl._opspace_force(cache, cache[attraction_spring_id])
+        push!(force_attraction_spring, f_spring)
+
+        f_damper = VMRobotControl._opspace_force(cache, cache[attraction_damper_id])
+        push!(force_attraction_damper, f_damper)
+
     end
 end
 
@@ -345,7 +499,7 @@ function ros_vm_controller(
         node = Node("vmc_controller_julia_debug")
 
 
-        # --- Publisher ---
+        # --- Publishers ---
 
         # Torque Publisher
         torque_topic = "/NS_1/julia_torque_controller/external_torques"
@@ -379,8 +533,13 @@ function ros_vm_controller(
         ros_task = @async try
             rclpy.spin(node)
         catch e
-            println("CRITICAL ERROR IN ROS TASK:")
-            showerror(stdout, e, catch_backtrace())
+            if e isa InterruptException
+                println("\nInterrupted: saving log file in $FILE_NAME...")
+                @save FILE_NAME time_log joint_pos_log joint_vel_log link_vel_log torques_log tcp_pos_log cam_pos_log target_pos_log force_attraction_spring force_attraction_damper 
+            else
+                println("CRITICAL ERROR IN ROS TASK:")
+                showerror(stdout, e, catch_backtrace())
+            end
         end
 
         # Initialize Control Cache with first received joint state
@@ -419,12 +578,13 @@ function ros_vm_controller(
         end
         
         # Initialize the arguments for the f_setup
-        local target_id, rep_ids, cam_frame_id, link_coords_ids
+        local target_id, rep_ids, cam_frame_id, link_coords_ids, floor_h, att_spring_id, att_damp_id, tcp_id, cam_id
 
         # Unpack args explicitly to check structure
         println("DEBUG [5]: Unpacking args...")
         try
-            (target_id, rep_ids, cam_frame_id, link_coords_ids) = args
+            (target_id, rep_ids, cam_frame_id, link_coords_ids, floor_h, 
+            att_spring_id, att_damp_id, tcp_id, cam_id) = args
             println("DEBUG [5.1]: Unpacking OK. Camera Frame ID found: $cam_frame_id")
         catch e
             println("\n🔴 CRITICAL ERROR UNPACKING ARGS (Check f_setup return):")
@@ -466,6 +626,7 @@ function ros_vm_controller(
                 qʳ = latest_state_array[1:NDOF]
                 q̇ʳ = latest_state_array[NDOF+1:2*NDOF]
                 
+                
                 # Logic Step
                 f_control(control_cache, t, args, dt) 
                 
@@ -490,6 +651,13 @@ function ros_vm_controller(
                 pymsg = Float64MultiArray()
                 pymsg.data = pylist(desired_torques)
                 torque_publisher.publish(pymsg)
+
+
+                # ----------------- LOGGING --------------------
+                push!(joint_pos_log, qʳ)
+                push!(joint_vel_log, q̇ʳ)
+                push!(torques_log, desired_torques)
+                # ----------------------------------------------
 
 
                 # ========================
@@ -582,6 +750,9 @@ function ros_vm_controller(
                     v_vec = VMRobotControl.velocity(control_cache, cid)
                     v_norm = norm(v_vec)
 
+                    # Save the vel in a vec
+                    push!(current_link_vels, v_norm)
+
                     # Update the maximum velocity to update the value to send to the python node
                     if v_norm > max_link_vel
                         max_link_vel = v_norm
@@ -596,13 +767,16 @@ function ros_vm_controller(
                 end
 
 
+                # --------------- LOGGING ---------------------
+                push!(link_vel_log, current_link_vels)
+                # ---------------------------------------------
+
+
                 # 2. Compute and Print Joint Torques
 
                 torque_treshold = 0.2
 
-                (all_torques, _) = VMRobotControl.get_generalized_force(control_cache)
-
-                current_torques = all_torques[1:7]                              # First 7 are joint torques
+                current_torques = desired_torques                            # First 7 are joint torques
 
                 max_joint_torque = maximum(abs.(current_torques))               # We use just the maximum torque among all the joints ones to represent the torques situation
 
@@ -664,10 +838,14 @@ function ros_vm_controller(
                 t = t + dt
 
             catch e
-                println("\n🔴 CRITICAL ERROR INSIDE CONTROL LOOP at t=$t:")
-                showerror(stdout, e, catch_backtrace())
-                println("\n")
-                rethrow(e)
+                if e isa InterruptException
+                    println("\nCaught Interrupt. Shutting down...")
+                else
+                    println("\n🔴 CRITICAL ERROR INSIDE CONTROL LOOP at t=$t:")
+                    showerror(stdout, e, catch_backtrace())
+                    println("\n")
+                    rethrow(e)
+                end
             end
         end
         
@@ -755,7 +933,7 @@ function target_callback(pymsg, target_channel::Channel{Any})
         target_vec = SVector(tx, ty, tz)
         
         # Extract Obstacles (GeometryMsgs/Point[] -> Vector{SVector})
-        obs_vec = Vector{SVector{3, Float64}}()
+        obs_vec = SVector{3, Float64}[]
         py_obstacles = pymsg.active_obstacles
         
         for py_pt in py_obstacles
