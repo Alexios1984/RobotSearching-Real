@@ -1,0 +1,12 @@
+std_msgs/Header header
+
+# Attraction Parameters
+float64 cam_to_target_stiffness
+float64 cam_to_target_max_force
+float64 cam_to_target_damping
+
+# Repulsion Parameters
+float64 repulsion_guard_max_force
+float64 repulsion_guard_width
+float64 repulsion_floor_max_force
+float64 repulsion_floor_width

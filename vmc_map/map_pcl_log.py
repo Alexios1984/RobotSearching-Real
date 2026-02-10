@@ -8,9 +8,9 @@ from scipy.spatial import cKDTree
 from scipy.ndimage import binary_dilation
 
 # ROS Messages
-from vmc_interfaces.msg import ObjectDetection3DArray, VmcRobotState, VmcObstacles, VmcTarget
+from vmc_interfaces.msg import ObjectDetection3DArray, VmcRobotState, VmcObstacles, VmcTarget, VmcMapConfig, VmcTargetDecision
 from geometry_msgs.msg import Point, Vector3
-from std_msgs.msg import Header, ColorRGBA, Float64MultiArray
+from std_msgs.msg import Header, ColorRGBA, Float64MultiArray, Float32
 from visualization_msgs.msg import Marker
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
@@ -217,7 +217,7 @@ class MapLogicNode(Node):
         # ============================
 
         self.pub_target = self.create_publisher(                    # Target voxel and set of obstacles
-            Point, '/vmc/target_point', 10)
+            VmcTarget, '/vmc/target_point', 10)
         
         self.pub_obstacles = self.create_publisher(                 # Set of obstacles
             VmcObstacles, '/vmc/active_obstacles', 10)
@@ -239,8 +239,19 @@ class MapLogicNode(Node):
 
         self.pub_status_text = self.create_publisher(               # Completion Text
             Marker, '/vmc/status_text', 10)
+        
+        # ============================
+        # --- Log Publishers --- 
+        # ============================
+        
+        self.pub_log_config = self.create_publisher(                # Log Config
+            VmcMapConfig, '/vmc/log/config', 1)    
+        
+        self.pub_log_decision = self.create_publisher(              # Log Decision
+            VmcTargetDecision, '/vmc/log/target_decision', 10)
 
-
+        self.publish_experiment_config()                            # Publish the experiment configuration
+        
         # ============================
         # --- Timers ---
         # ============================
@@ -254,6 +265,9 @@ class MapLogicNode(Node):
         
         # Obstacles Timer
         self.timer_obstacles = self.create_timer(0.05, self.publish_obstacles_worker, callback_group=self.cb_group)
+        
+        
+        
     # -----------------------------------------------------------------------------------------------------------------------
 
 
@@ -385,7 +399,7 @@ class MapLogicNode(Node):
             
             # If we get here means that we do not have a target and we need to find one.
             # Search now a new one calling the ad-hoc function 
-            best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
+            best_idx, score_details, is_risky = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
 
             # Whenever we cannot find a target means that we should search in the ignored list
             if best_idx is None:
@@ -399,12 +413,12 @@ class MapLogicNode(Node):
                     self.last_deadlock_pos = None  
                     
                     # Now that we have done a reset we can search for a new target 
-                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
+                    best_idx, score_details, is_risky = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
 
                 if best_idx is None:
                      
                     self.get_logger().warn("⚠️ No safe or ignored voxels available: Wall Skin Filter Off.")
-                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
+                    best_idx, score_details, is_risky = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
 
             if best_idx:
                 self.current_target_idx = best_idx
@@ -420,6 +434,31 @@ class MapLogicNode(Node):
                 msg.target_position.z = target_pos[2]
                 
                 self.pub_target.publish(msg)
+                
+                # -- Log --
+                log_msg = VmcTargetDecision()
+                log_msg.header.stamp = self.get_clock().now().to_msg()
+                log_msg.header.frame_id = "fr3_link0"
+                
+                log_msg.selected_target.x = target_pos[0]
+                log_msg.selected_target.y = target_pos[1]
+                log_msg.selected_target.z = target_pos[2]
+                
+                log_msg.is_risky_pool = bool(is_risky)
+                log_msg.is_deadlocked = self.is_deadlocked
+                
+                log_msg.score_total = float(score_details['total'])
+                log_msg.score_frontality = float(score_details['frontality'])
+                log_msg.score_distance = float(score_details['distance'])
+                log_msg.score_relevance = float(score_details['relevance'])
+                
+                # Calcoliamo al volo la % di esplorazione per averla sincrona col target
+                total_voxels = self.N_VOXELS_X * self.N_VOXELS_Y * self.N_VOXELS_Z
+                mask_explored = (self.grid < self.VAL_FREE) | (self.grid > self.VAL_OCCUPIED)
+                log_msg.exploration_percentage = (np.count_nonzero(mask_explored) / total_voxels) * 100.0
+                
+                self.pub_log_decision.publish(log_msg)
+                # ---------
                     
             else:
                 self.get_logger().info("🎉 Completed Exploration! (Davvero finito tutto, anche i risky).", throttle_duration_sec=5.0)
@@ -719,6 +758,13 @@ class MapLogicNode(Node):
         best_score = -np.inf
         best_idx = None
         
+        best_score_details = {
+        'total': 0.0,
+        'frontality': 0.0,
+        'distance': 0.0,
+        'relevance': 0.0
+    }
+        
         # Normalization Parameters (the relevenca one is in the get_relevance function)
         y_min, y_max = self.WS_BOUNDS['y']          
         y_range = max(y_max - y_min, 1.0)           # Frontality Normalization Parameter
@@ -752,9 +798,17 @@ class MapLogicNode(Node):
             if score > best_score:
                 best_score = score
                 best_idx = tuple(idx)
+                
+                best_score_details['total'] = score
+                best_score_details['frontality'] = norm_frontality
+                best_score_details['distance'] = norm_dist_score
+                best_score_details['relevance'] = norm_relevance
 
+        is_risky = (len(safe_candidates) == 0 and self.last_deadlock_pos is not None)
+        
         print("\n", best_idx)
-        return best_idx
+        
+        return best_idx, best_score_details, is_risky
     
     
     """
@@ -1244,6 +1298,23 @@ class MapLogicNode(Node):
     # ============================================================================================================================================
     # --- Visualization Functions ---
     # ============================================================================================================================================
+
+    def publish_experiment_config(self):
+        msg = VmcMapConfig()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        
+        msg.workspace_bounds_x = [float(self.WS_BOUNDS['x'][0]), float(self.WS_BOUNDS['x'][1])]
+        msg.workspace_bounds_y = [float(self.WS_BOUNDS['y'][0]), float(self.WS_BOUNDS['y'][1])]
+        msg.workspace_bounds_z = [float(self.WS_BOUNDS['z'][0]), float(self.WS_BOUNDS['z'][1])]
+        
+        msg.voxel_size = float(self.TARGET_VOXEL_SIZE)
+        msg.hit_increment = float(self.HIT_INC)
+        msg.miss_decrement = float(self.MISS_DEC)
+        msg.val_occupied_thresh = int(self.VAL_OCCUPIED)
+        msg.val_free_thresh = int(self.VAL_FREE)
+        
+        self.pub_log_config.publish(msg)
+        self.get_logger().info("💾 Configurazione Log pubblicata.")
 
     """ 
     Draw the frustum attached to the camera and moving with it.
