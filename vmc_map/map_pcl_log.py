@@ -1179,36 +1179,6 @@ class MapLogicNode(Node):
 
         return sparse_obstacles
 
-
-
-    """
-    Publishes a VmcControlTarget message to guide the robot.
-    This message includes:
-    - The target attractor point for the robot's end-effector.
-    - A list of active obstacles (repulsors) derived from the voxel grid,
-        downsampled to maintain a minimum distance between them.
-    - A visualization marker for the active repulsors.
-    """
-    def publish_command(self, target_pos):
-        
-        # Create the message for julia script
-        msg = VmcControlTarget()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        
-        # Insert in the message the target 
-        msg.target_attractor = Point(x=target_pos[0], y=target_pos[1], z=target_pos[2])
-
-        # Filter the obstacle pointcloud 
-        optimized_obstacles = self.get_downsampled_obstacles()
-
-        # Insert in the message the obstacle list of repulsors
-        for obs_pos in optimized_obstacles:
-            msg.active_obstacles.append(Point(x=obs_pos[0], y=obs_pos[1], z=obs_pos[2]))
-            
-        # Publish the message to julia
-        self.pub_target.publish(msg)
-
-
     def grid_to_world(self, ix, iy, iz):
         x = self.WS_BOUNDS['x'][0] + (ix + 0.5) * self.res_x
         y = self.WS_BOUNDS['y'][0] + (iy + 0.5) * self.res_y
