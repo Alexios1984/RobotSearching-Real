@@ -4,11 +4,12 @@ import numpy as np
 import cv2
 from cv_bridge import CvBridge
 import time
+import json
 
 # ROS 2 Messages
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
-from std_msgs.msg import Header, Int32
+from std_msgs.msg import Header, Int32, Float32, String
 
 class DepthVisionNode(Node):
     
@@ -20,6 +21,8 @@ class DepthVisionNode(Node):
         super().__init__('vision_pcl')
         
         self.bridge = CvBridge()        # OpenCV Bridge for image conversion
+
+        self.prev_time = time.time()    # Needed for FPS computation
 
         # ==========================
         # --- CAMERA CONFIGURATION ---
@@ -59,14 +62,16 @@ class DepthVisionNode(Node):
             10
         )
         
-        self.pub_count = self.create_publisher(
-            Int32,
-            '/vision/point_count',
-            10
-        )
-
+        # -- Log Publishers --
+        
+        self.pub_config = self.create_publisher(String, '/vision/node_config', 10)
+        self.pub_count = self.create_publisher(Int32, '/vision/point_count', 10)
+        
+        
         # Logging
         self.get_logger().info(f"Depth Node Ready! Range: {self.min_dist}-{self.max_dist}m")
+        
+        self.create_timer(1.0, self.publish_config_once)    # Timer for the one shot camera configuration parameters publish
 
 
     """
@@ -135,6 +140,24 @@ class DepthVisionNode(Node):
 
         # Publish the count of the points sent
         self.pub_count.publish(Int32(data=points_3d.shape[0])) 
+        
+        
+    def publish_config_once(self):
+        
+        config_data = {
+            "min_dist_m": self.min_dist,
+            "max_dist_m": self.max_dist,
+            "decimation_factor": self.decimation,
+            "depth_scale": self.depth_scale,
+            "node_name": self.get_name()
+        }
+        
+        msg = String()
+        msg.data = json.dumps(config_data)
+        self.pub_config.publish(msg)
+        self.get_logger().info(f"Config published to /vision/node_config: {msg.data}")
+        # Cancelliamo il timer, basta farlo una volta
+        pass
 
 def main(args=None):
     rclpy.init(args=args)
