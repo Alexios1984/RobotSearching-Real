@@ -399,7 +399,7 @@ function ros_vm_controller(
         sub_target = node.create_subscription(VmcTarget, "/vmc/target_point", target_callback_wrapper, 10)
 
         obstacles_callback_wrapper = (obstacle_msg) -> obstacles_callback(obstacle_msg, obstacles_channel)
-        sub_obstacles = node.create_subscription(VmcObstacles, "/vmc/target_point", obstacles_callback_wrapper, 10)
+        sub_obstacles = node.create_subscription(VmcObstacles, "/vmc/active_obstacles", obstacles_callback_wrapper, 10)
 
         println("DEBUG [1.2]: Subscribers created.")
 
