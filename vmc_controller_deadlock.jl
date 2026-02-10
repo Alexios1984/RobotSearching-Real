@@ -90,7 +90,11 @@ const EXTRA_POINTS_CONFIG = [       # Extra points on the robot to be repulsed f
     
     # Hand TCP
     ("fr3_hand_tcp", SVector(0.0, 0.08, -0.07), "coll_HAND_left"),
-    ("fr3_hand_tcp", SVector(0.0, -0.08, -0.07),"coll_HAND_right")
+    ("fr3_hand_tcp", SVector(0.0, -0.08, -0.07),"coll_HAND_right"),
+
+    # Fingers
+    ("fr3_hand_tcp", SVector(0.0, 0.05, -0.0), "left_finger"),
+    ("fr3_hand_tcp", SVector(0.0, -0.05, -0.0),"right_finger")
 ]
 const TOTAL_COLLISION_FRAMES = vcat(COLLISION_LINKS, [cfg[3] for cfg in EXTRA_POINTS_CONFIG])
 
@@ -137,7 +141,7 @@ for (i, τ_coulomb) in zip(1:7, [5.0, 5.0, 5.0, 5.0, 3.0, 3.0, 3.0])
         add_deadzone_springs!(robot, 80.0, (limits.lower+0.1, limits.upper-0.1), cid)
     end
     add_component!(robot, TanhDamper(τ_coulomb, 1e-1, cid); id="JDamp$i")
-    add_component!(robot, LinearDamper(3.0, cid); id="ViscousDamp$i")
+    add_component!(robot, LinearDamper(5.0, cid); id="ViscousDamp$i")
 end
 
 
@@ -171,7 +175,7 @@ add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_att
 add_coordinate!(vms, CoordDifference("target_attractor", ".robot.camera_nose"); id="cam_to_target_error")
 
 add_component!(vms, TanhSpring("cam_to_target_error"; max_force=20.0, stiffness=200.0); id="attraction_spring")
-add_component!(vms, LinearDamper(10.0 * identity(3), "cam_to_target_error"); id="attraction_damper")
+add_component!(vms, LinearDamper(12.0 * identity(3), "cam_to_target_error"); id="attraction_damper")
 
 
 # --- Obstacle Repulsors for Camera ---

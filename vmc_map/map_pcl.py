@@ -49,20 +49,34 @@ class MapLogicNode(Node):
         # --- Workspace Configuration ---
         # ==============================
         
-        self.WS_BOUNDS = {                  # Definition of the global limits (World Frame)
-            'x': [-0.15, 0.44],   
-            'y': [ 0.68, 1.18],
-            'z': [ 0.01, 0.8]
-        }
+        # self.WS_BOUNDS = {                  # Test Workspace
+        #     'x': [-0.15, 0.44],   
+        #     'y': [ 0.68, 1.18],
+        #     'z': [ 0.01, 0.8]
+        # }
 
-        # self.WS_BOUNDS = {                  # Definition of the global limits (World Frame)
+        # self.WS_BOUNDS = {                  # Bounds for Shelves Case
         #     'x': [-0.25, 0.55],   
         #     'y': [ 0.55, 1.2],
         #     'z': [ 0.01, 1.1]
         # }
 
-        self.TARGET_VOXEL_SIZE = 0.05             # Voxel size in meters
-        
+        # self.WS_BOUNDS = {                  # Bounds for Strawberries Case
+        #     'x': [-0.15, 0.55],   
+        #     'y': [ 0.75, 1.1],
+        #     'z': [ 0.45, 0.85]
+        # }
+
+        self.WS_BOUNDS = {                  # Bounds for Boxes Case
+            'x': [-0.24, 0.55],   
+            'y': [ 0.35, 1.1],
+            'z': [ 0.01, 0.70]
+        }
+
+        self.TARGET_VOXEL_SIZE = 0.05             # Voxel size in meters (Shelves Case)
+        self.TARGET_VOXEL_SIZE = 0.02             # Voxel size in meters (Strawberries Case)
+        self.TARGET_VOXEL_SIZE = 0.04             # Voxel size in meters (Boxes Case)
+
         # Dimensions of the workspace
         self.dim_x = self.WS_BOUNDS['x'][1] - self.WS_BOUNDS['x'][0]
         self.dim_y = self.WS_BOUNDS['y'][1] - self.WS_BOUNDS['y'][0]
@@ -127,7 +141,7 @@ class MapLogicNode(Node):
 
         # --- Logic Configuration ---
         
-        self.MAX_OBSTACLES = 50                        # Max number of repulsors to consider (for performance). Selected among the points of the point cloud.
+        self.MAX_OBSTACLES = 100                        # Max number of repulsors to consider (for performance). Selected among the points of the point cloud.
 
         self.latest_cam_pose = None                     # Latest Camera Pose (from Robot State)
         
@@ -135,7 +149,7 @@ class MapLogicNode(Node):
 
         self.cb_group = ReentrantCallbackGroup()        # Lock for the group where all can access at the same time (for parallelization). The default group is the MutuallyExsclusiveCallbackGroup that means that just one per time can be executed
 
-        self.min_distance_rep = 0.10                    # Minimum distance between repulsors 
+        self.min_distance_rep = 0.06                  # Minimum distance between repulsors 
 
         self.min_points_per_voxel = 20                  # Minimun number of points to be in a voxel to be considered occupied, otherwise it's just noise
         
@@ -155,7 +169,7 @@ class MapLogicNode(Node):
         self.last_moving_time = time.time()             # Last time we moved (used to compute the time spent in a configuration)
         
         self.last_discovery_check_time = time.time()    # Last time we checked for discovery rate
-        self.DISCOVERY_CHECK_INTERVAL = 2.0             # Interval between discovery rate checks (seconds)
+        self.DISCOVERY_CHECK_INTERVAL = 5.0             # Interval between discovery rate checks (seconds)
         self.MIN_DISCOVERY_RATE = 0.1                   # Minimum discovery rate (new unknown voxels per second) to consider that we are moving
         
         self.is_deadlocked = False                      # Flag for the deadlock
