@@ -152,6 +152,8 @@ class MapLogicNode(Node):
 
         self.min_points_per_voxel = 20                  # Minimun number of points to be in a voxel to be considered occupied, otherwise it's just noise
         
+        self.MINIMUM_EXPLORED_PERCENTAGE = 95.0         # Minimum completion of the grid to compare the result
+        
         # --- Deadlock Configuration ---
         
         self.TIME_TRESHOLD_DEADLOCK = 5.0               # Time to wait before starting checking for deadlocks (to avoid initial ignored zone)
@@ -1587,6 +1589,11 @@ class MapLogicNode(Node):
         marker.scale.y = 0.0
         marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
         marker.text = f"Found {explored_count} / {total_voxels} Voxels"
+        
+        if percentage >= self.MINIMUM_EXPLORED_PERCENTAGE:
+            self.get_logger().info("Reached 95%", " of the exploration at t: %s", self.get_clock().now().to_string)
+            self.pub_completion_time.publish(self.get_clock().now().to_msg())
+
 
         self.pub_status_text.publish(marker)
 
