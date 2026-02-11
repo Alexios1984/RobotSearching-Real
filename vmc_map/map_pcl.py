@@ -219,7 +219,7 @@ class MapLogicNode(Node):
         # ============================
 
         self.pub_target = self.create_publisher(                    # Target voxel and set of obstacles
-            Point, '/vmc/target_point', 10)
+            VmcTarget, '/vmc/target_point', 10)
         
         self.pub_obstacles = self.create_publisher(                 # Set of obstacles
             VmcObstacles, '/vmc/active_obstacles', 10)
