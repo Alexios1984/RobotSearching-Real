@@ -415,7 +415,7 @@ class MapLogicNode(Node):
                     # Publish the target and wait
                     target_pos = self.grid_to_world(*curr_idx)
                     
-                    msg = Point() # Assuming VmcTarget was replaced by Point based on earlier iterations, or use VmcTarget if required
+                    msg = VmcTarget() 
                     msg.x, msg.y, msg.z = float(target_pos[0]), float(target_pos[1]), float(target_pos[2])
                     self.pub_target.publish(msg)
                     return
