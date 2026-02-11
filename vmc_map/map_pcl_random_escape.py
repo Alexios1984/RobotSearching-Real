@@ -330,7 +330,14 @@ class MapLogicNode(Node):
             # Check if we reached the intermediate recovery voxel
             if self.is_recovering and not self.has_reached_intermediate and curr_idx is not None:
                 curr_voxel_pos = self.grid_to_world(*curr_idx)
-                dist_to_intermediate = np.linalg.norm(cam_pos - curr_voxel_pos)
+                
+                # Compute NOSE position (0.25m offset along Camera Z-axis)
+                r_cam = R.from_quat(self.latest_cam_pose['quat'])
+                nose_offset_cam = np.array([0.0, 0.0, 0.25])
+                nose_pos_world = cam_pos + r_cam.apply(nose_offset_cam)
+                
+                # Check distance using the nose, not the camera base
+                dist_to_intermediate = np.linalg.norm(nose_pos_world - curr_voxel_pos)
                 
                 if dist_to_intermediate < self.RECOVERY_REACH_TOLERANCE:
                     self.get_logger().info("🔄 Reached intermediate recovery voxel. Retrying original target!")
