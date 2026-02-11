@@ -35,7 +35,7 @@ Main node to manage the voxel grid mapping from point clouds.
 class MapLogicNode(Node):
     def __init__(self):
         
-        super().__init__('map_pcl')
+        super().__init__('map_pcl_log')
 
         self.node_start_time = None                 # Used not to go in deadlock at time 0.0
 

@@ -28,7 +28,12 @@ const JointState = pyimport("sensor_msgs.msg").JointState
 const Float64MultiArray = pyimport("std_msgs.msg").Float64MultiArray
 const CameraInfo = pyimport("sensor_msgs.msg").CameraInfo
 const VmcRobotState = pyimport("vmc_interfaces.msg").VmcRobotState
-const VmcControlTarget = pyimport("vmc_interfaces.msg").VmcControlTarget
+const VmcObstacles = pyimport("vmc_interfaces.msg").VmcObstacles
+const VmcTarget = pyimport("vmc_interfaces.msg").VmcTarget
+const VmcControlConfig = pyimport("vmc_interfaces.msg").VmcControlConfig
+const VmcSystemLog = pyimport("vmc_interfaces.msg").VmcSystemLog
+const Point = pyimport("geometry_msgs.msg").Point
+const Vector3 = pyimport("geometry_msgs.msg").Vector3
 
 
 # --- Python Path Setup ---
@@ -114,7 +119,8 @@ const FLOOR_Z_LEVEL = 0.01          # Height at which the floor is supposed to b
 # --- Shared Channels for Communication ---
 
 state_channel = Channel{Vector{Float64}}(1)         # Buffer for joint states
-target_channel = Channel{Any}(2)                    # Buffer for target and obstacles
+target_channel = Channel{Any}(2)                # Buffer for target 
+obstacles_channel = Channel{Any}(2)     # Buffer for obstacles
 
 
 # ======================================
@@ -157,7 +163,7 @@ vms = VirtualMechanismSystem("franka_impedance_control", robot)
 
 root = root_frame(vms.robot)
 
-add_coordinate!(robot, FrameOrigin("fr3_hand_tcp"); id="TCP position")                                          # TCP Position Coordinate
+add_coordinate!(robot, FramePoint("fr3_hand_tcp", SVector(0.0, 0.0, 0.0)); id="TCP position")                                          # TCP Position Coordinate
 
 # --- Camera Frame & Attractor --- 
 
@@ -174,11 +180,17 @@ add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_att
 
 add_coordinate!(vms, CoordDifference("target_attractor", ".robot.camera_nose"); id="cam_to_target_error")
 
-add_component!(vms, TanhSpring("cam_to_target_error"; max_force=20.0, stiffness=200.0); id="attraction_spring")
-add_component!(vms, LinearDamper(12.0 * identity(3), "cam_to_target_error"); id="attraction_damper")
+CAM_TO_TARG_STIFF = 200.0
+CAM_TO_TARG_MAXFORCE = 20.0
+CAM_TO_TARG_DAMPING = 12.0
+add_component!(vms, TanhSpring("cam_to_target_error"; max_force=CAM_TO_TARG_MAXFORCE, stiffness=CAM_TO_TARG_STIFF); id="attraction_spring")
+add_component!(vms, LinearDamper(CAM_TO_TARG_DAMPING * identity(3), "cam_to_target_error"); id="attraction_damper")
 
 
 # --- Obstacle Repulsors for Camera ---
+
+const REPULSION_MAXFORCE = -10.0
+const REPULSION_WIDTH = 0.04
 
 for i in 1:N_REPULSORS
 
@@ -191,7 +203,7 @@ for i in 1:N_REPULSORS
     add_coordinate!(vms, CoordDifference(rep_id, ".robot.camera_position"); id=err_id)
     
     # Camera Repulsion Spring
-    add_component!(vms, GaussianSpring(err_id; max_force=-10.0, width=0.04); id="repulsor_spring_$i")
+    add_component!(vms, GaussianSpring(err_id; max_force=REPULSION_MAXFORCE, width=REPULSION_WIDTH); id="repulsor_spring_$i")
 end
 
 
@@ -202,6 +214,9 @@ for (parent, offset, fname) in EXTRA_POINTS_CONFIG
 end
 
 # --- Obstacle Repulsors for Body (Floor + Obstacles) ---
+
+const REPULSION_FLOOR_MAXFORCE = -20.0
+const REPULSION_FLOOR_WIDTH = 0.05
 
 for link_name in TOTAL_COLLISION_FRAMES
 
@@ -216,7 +231,7 @@ for link_name in TOTAL_COLLISION_FRAMES
 
         # Body Repulsion Spring
         sping_id = "$(link_name)_link_repulsor_spring_$i"
-        add_component!(vms, GaussianSpring(error; max_force=-10.0, width=0.04); id=sping_id)
+        add_component!(vms, GaussianSpring(error; max_force=REPULSION_MAXFORCE, width=REPULSION_WIDTH); id=sping_id)
     end
 
     # Repulsor on each link for FLOOR
@@ -228,7 +243,7 @@ for link_name in TOTAL_COLLISION_FRAMES
     add_coordinate!(vms, CoordDifference(shadow_id, ".robot.$(link_name)_pos"); id=floor_error_id)
 
     if !(link_name in IGNORED_FLOOR_LINKS)
-        add_component!(vms, GaussianSpring(floor_error_id; max_force=-20.0, width=0.05); id="FloorSpring_$(link_name)")
+        add_component!(vms, GaussianSpring(floor_error_id; max_force=REPULSION_FLOOR_MAXFORCE, width=REPULSION_FLOOR_WIDTH); id="FloorSpring_$(link_name)")
     end
 
 end
@@ -281,19 +296,21 @@ function f_control(cache, t, args, dt)
     # Non-blocking check for new target data
     if isready(target_channel)
 
-        # Get Data from Target & Obstacles Channel: Expecting Tuple (Target, Obstacles list)
-        data = take!(target_channel) 
-
-        new_target = data[1]        # New Target Attractor
-        obstacles = data[2]         # New Obstacles List
-        
-        # println("🎯 New Target Voxel: [x=$(round(new_target[1], digits=3)), y=$(round(new_target[2], digits=3)), z=$(round(new_target[3], digits=3))]")
+        new_target = take!(target_channel) 
+        # println("🎯 New Target received: $new_target")
+                
         println("t: $(round(t, digits=2))")
         
-        # -- Update Target ---
+        # --- Update Target ---
         
         cache[target_id].coord_data.val[] = SVector(new_target[1], new_target[2], new_target[3])
-        
+    
+    end
+
+    # Non-blocking check for new obstacle data
+    if isready(obstacles_channel)
+
+        obstacles = take!(obstacles_channel)
 
         # --- Update Repulsors ---
 
@@ -368,7 +385,10 @@ function ros_vm_controller(
 
         # Target & Obstacles Subscriber
         target_callback_wrapper = (target_msg) -> target_callback(target_msg, target_channel)
-        sub_target = node.create_subscription(VmcControlTarget, "/vmc/target_obstacles", target_callback_wrapper, 10)
+        sub_target = node.create_subscription(VmcTarget, "/vmc/target_point", target_callback_wrapper, 10)
+
+        obstacles_callback_wrapper = (obstacle_msg) -> obstacles_callback(obstacle_msg, obstacles_channel)
+        sub_obstacles = node.create_subscription(VmcObstacles, "/vmc/active_obstacles", obstacles_callback_wrapper, 10)
 
         println("DEBUG [1.2]: Subscribers created.")
 
@@ -600,9 +620,7 @@ function ros_vm_controller(
 
                 torque_treshold = 0.2
 
-                (all_torques, _) = VMRobotControl.get_generalized_force(control_cache)
-
-                current_torques = all_torques[1:7]                              # First 7 are joint torques
+                current_torques = desired_torques[1:7]                              # First 7 are joint torques
 
                 max_joint_torque = maximum(abs.(current_torques))               # We use just the maximum torque among all the joints ones to represent the torques situation
 
@@ -744,33 +762,38 @@ function joint_state_callback(pymsg, state_channel::Channel{Vector{Float64}})
 end
 
 
+
 function target_callback(pymsg, target_channel::Channel{Any})
     try
         # Extract Target Attractor (GeometryMsgs/Point -> SVector)
-        tx = pyconvert(Float64, pymsg.target_attractor.x)
-        ty = pyconvert(Float64, pymsg.target_attractor.y)
-        tz = pyconvert(Float64, pymsg.target_attractor.z)
+        tx = pyconvert(Float64, pymsg.target_position.x)
+        ty = pyconvert(Float64, pymsg.target_position.y)
+        tz = pyconvert(Float64, pymsg.target_position.z)
 
-        # Create Target SVector
-        target_vec = SVector(tx, ty, tz)
-        
-        # Extract Obstacles (GeometryMsgs/Point[] -> Vector{SVector})
-        obs_vec = Vector{SVector{3, Float64}}()
-        py_obstacles = pymsg.active_obstacles
-        
-        for py_pt in py_obstacles
-            ox = pyconvert(Float64, py_pt.x)
-            oy = pyconvert(Float64, py_pt.y)
-            oz = pyconvert(Float64, py_pt.z)
-            push!(obs_vec, SVector(ox, oy, oz))
-        end
-        
-        # Put tuple (Target, Obstacles) into channel
-        put!(target_channel, (target_vec, obs_vec))
+        put!(target_channel, SVector(tx, ty, tz))
 
     catch e
         println("Error in target callback:")
         showerror(stdout, e)
+    end
+end
+
+function obstacles_callback(pymsg, obstacles_channel::Channel{Any})
+    try
+        obs_vec = Vector{SVector{3, Float64}}()
+        py_list = pymsg.obstacles
+        
+        for single_obstacle in py_list
+            ox = pyconvert(Float64, single_obstacle.x)
+            oy = pyconvert(Float64, single_obstacle.y)
+            oz = pyconvert(Float64, single_obstacle.z)
+            push!(obs_vec, SVector(ox, oy, oz))
+        end
+        
+        put!(obstacles_channel, obs_vec)
+
+    catch e
+        println("Error obstacles callback: $e")
     end
 end
 

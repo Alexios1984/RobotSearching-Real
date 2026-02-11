@@ -18,7 +18,7 @@ class DepthVisionNode(Node):
     """
     def __init__(self):
         
-        super().__init__('vision_pcl')
+        super().__init__('vision_pcl_log')
         
         self.bridge = CvBridge()        # OpenCV Bridge for image conversion
 

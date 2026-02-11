@@ -49,7 +49,7 @@ end
 
 # -- Configuration Constants ---
 
-const N_REPULSORS = 100             # Number of obstacle repulsors distributed on the objects
+const N_REPULSORS = 5             # Number of obstacle repulsors distributed on the objects
 
 const COLLISION_LINKS =[            # Links to consider for collision avoidance
         "fr3_hand_tcp", 
@@ -118,8 +118,8 @@ const FLOOR_Z_LEVEL = 0.01          # Height at which the floor is supposed to b
 # --- Shared Channels for Communication ---
 
 state_channel = Channel{Vector{Float64}}(1)         # Buffer for joint states
-target_channel = Channel{SVector{3, Float64}}(1)                # Buffer for target 
-obstacles_channel = Channel{Vector{SVector{3, Float64}}}(1)     # Buffer for obstacles
+target_channel = Channel{Any}(2)                # Buffer for target 
+obstacles_channel = Channel{Any}(2)     # Buffer for obstacles
 
 # ======================================
 # --- VMC & Robot Setup ---
@@ -159,7 +159,7 @@ vms = VirtualMechanismSystem("franka_impedance_control", robot)
 
 root = root_frame(vms.robot)
 
-add_coordinate!(robot, FrameOrigin("fr3_hand_tcp"); id="TCP position")                                          # TCP Position Coordinate
+add_coordinate!(robot, FramePoint("fr3_hand_tcp", SVector(0.0, 0.0, 0.0)); id="TCP position")                                          # TCP Position Coordinate
 
 # --- Camera Frame & Attractor --- 
 
@@ -265,7 +265,7 @@ function f_setup(cache)
     attraction_spring_id = get_compiled_componentID(cache, "attraction_spring")
     attraction_damper_id = get_compiled_componentID(cache, "attraction_damper")
     
-    tcp_coord_id = get_compiled_coordID(cache, "TCP position")
+    tcp_coord_id = get_compiled_coordID(cache, ".robot.TCP position")
 
     # --- Link Coordinates for Velocity Check & Floor Repulsion ---
 
