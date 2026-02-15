@@ -10,3 +10,7 @@ float64 repulsion_guard_max_force
 float64 repulsion_guard_width
 float64 repulsion_floor_max_force
 float64 repulsion_floor_width
+
+# Limit Avoidance
+float64 offset_angle
+float64 stiffness_deadzone

@@ -31,7 +31,7 @@ const VmcRobotState = pyimport("vmc_interfaces.msg").VmcRobotState
 const VmcObstacles = pyimport("vmc_interfaces.msg").VmcObstacles
 const VmcTarget = pyimport("vmc_interfaces.msg").VmcTarget
 const VmcControlConfig = pyimport("vmc_interfaces.msg").VmcControlConfig
-const VmcSystemLog = pyimport("vmc_interfaces.msg").VmcSystemLog
+const VmcTelemetry = pyimport("vmc_interfaces.msg").VmcTelemetry
 const Point = pyimport("geometry_msgs.msg").Point
 const Vector3 = pyimport("geometry_msgs.msg").Vector3
 
@@ -412,6 +412,14 @@ function ros_vm_controller(
         # Deadlock Publisher 
         deadlock_pub = node.create_publisher(Float64MultiArray, "/vmc/deadlock_data", 10)
         
+        # Log Config Publisher
+        pub_log_config = node.create_publisher(VmcControlConfig, "/vmc/log/config", 1)
+
+        publish_control_config(node, pub_log_config)
+
+        # Telemetry Publisher
+        telemetry_pub = node.create_publisher(VmcTelemetry, "/vmc/telemetry", 10)
+
         println("DEBUG [1.1]: Publishers created.")
         
         
@@ -494,7 +502,7 @@ function ros_vm_controller(
         # --- Control Function ---
         
         control_func! = let control_cache=control_cache, args=args, node=node, 
-                            torque_publisher=torque_publisher, state_publisher=state_publisher, deadlock_pub=deadlock_pub,
+                            torque_publisher=torque_publisher, state_publisher=state_publisher, deadlock_pub=deadlock_pub, telemetry_pub=telemetry_pub
                             cam_frame_id=cam_frame_id, link_coords_ids=link_coords_ids
             
             function control_func!(t, dt)
@@ -530,8 +538,11 @@ function ros_vm_controller(
                 # Physics Step
                 desired_torques = control_step!(control_cache, t, qʳ, q̇ʳ) 
 
+                base_torques = copy(desired_torques[1:7])  # Torques pure dal VMC (Senza limiti)
+                limit_torques = copy(u_robot[1:7])         # Torques generate solo dalle deadzone springs
+
                 # Limit Avoidance
-                desired_torques += u_robot
+                desired_torques[1:7] .+= u_robot
                 
                 # ========================
                 # ---- Publish Torques ---
@@ -624,6 +635,8 @@ function ros_vm_controller(
 
                 vel_treshold = 0.02
 
+                current_link_vels = Float64[]
+
                 max_link_vel = 0.0              # We use just the maximum velocity among all the links ones to represent the velocity situation
 
                 if verbose
@@ -642,6 +655,8 @@ function ros_vm_controller(
                     # Take velocity vector for this link
                     v_vec = VMRobotControl.velocity(control_cache, cid)
                     v_norm = norm(v_vec)
+
+                    push!(current_link_vels, v_norm)
 
                     # Update the maximum velocity to update the value to send to the python node
                     if v_norm > max_link_vel
@@ -695,6 +710,26 @@ function ros_vm_controller(
                 dl_msg = Float64MultiArray()
                 dl_msg.data = pylist([max_link_vel, max_joint_torque])
                 deadlock_pub.publish(dl_msg)
+
+                # ========================
+                # --- Publish Telemetry ---
+                # ========================
+                try
+                    tel_msg = VmcTelemetry()
+                    tel_msg.header.stamp = node.get_clock().now().to_msg()
+                    tel_msg.header.frame_id = "fr3_link0"
+                    
+                    # Converti gli array Julia in liste Python e inseriscili nel messaggio
+                    tel_msg.link_velocities = pylist(current_link_vels)
+                    tel_msg.base_torques = pylist(base_torques)
+                    tel_msg.limit_torques = pylist(limit_torques)
+                    tel_msg.total_torques = pylist(desired_torques[1:7]) # Torques finali (clippate e sommate)
+                    
+                    telemetry_pub.publish(tel_msg)
+                catch e
+                    println("⚠️ Error publishing telemetry: $e")
+                end
+
 
                 return false
             end
@@ -836,6 +871,29 @@ function obstacles_callback(pymsg, obstacles_channel::Channel{Any})
     catch e
         println("Error obstacles callback: $e")
     end
+end
+
+function publish_control_config(node, pub)
+    msg = VmcControlConfig()
+    msg.header.stamp = node.get_clock().now().to_msg()
+
+    # Attraction
+    msg.cam_to_target_stiffness = float(CAM_TO_TARG_STIFF)
+    msg.cam_to_target_max_force = float(CAM_TO_TARG_MAXFORCE)
+    msg.cam_to_target_damping = float(CAM_TO_TARG_DAMPING)
+
+    # Repulsion
+    msg.repulsion_guard_max_force = float(REPULSION_MAXFORCE)
+    msg.repulsion_guard_width = float(REPULSION_WIDTH)
+    msg.repulsion_floor_max_force = float(REPULSION_FLOOR_MAXFORCE)
+    msg.repulsion_floor_width = float(REPULSION_FLOOR_WIDTH)
+
+    # Limit Avoidance
+    msg.offset_angle = float(offset)
+    msg.stiffness_deadzone = float(stiffness_limits)
+
+    pub.publish(msg)
+    println("💾 VMC Configuration Published.")
 end
 
 cvms = compile(vms)
