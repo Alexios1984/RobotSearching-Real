@@ -286,6 +286,7 @@ class MapLogicNode(Node):
         self.pub_log_config = self.create_publisher(                # Log Config
             VmcMapConfig, '/vmc/log/config', 1) 
 
+
         self.publish_experiment_config()                            # Publish the experiment configuration
 
 
@@ -477,7 +478,7 @@ class MapLogicNode(Node):
             
             # If we get here means that we do not have a target and we need to find one.
             # Search now a new one calling the ad-hoc function 
-            best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
+            best_idx, best_scores = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
 
             # Whenever we cannot find a target means that we should search in the ignored list
             if best_idx is None:
@@ -510,6 +511,11 @@ class MapLogicNode(Node):
                 msg.target_position.x = target_pos[0]
                 msg.target_position.y = target_pos[1]
                 msg.target_position.z = target_pos[2]
+                
+                msg.score_total = best_scores['total']
+                msg.score_frontality = best_scores['frontality']
+                msg.score_relevance = best_scores['relevance']
+                msg.score_distance = best_scores['distance']
                 
                 self.pub_target.publish(msg)
                     
@@ -726,7 +732,7 @@ class MapLogicNode(Node):
             unknown_indices = np.argwhere(mask_unknown)
 
             if len(unknown_indices) == 0:
-                return None # Truly nothing to see
+                return None, None # Truly nothing to see
 
 
         # --- 3. Pre-Filtering ---
@@ -746,7 +752,7 @@ class MapLogicNode(Node):
                 candidates.append(idx)
                 
         if not candidates: 
-            return None
+            return None, None
         
         candidates = np.array(candidates)
 
@@ -789,7 +795,7 @@ class MapLogicNode(Node):
         # --- 5. Scoring Loop (Completamente Vettorizzato) ---
 
         if len(final_pool) == 0:
-            return None
+            return None, None
 
         # Garantisce la forma matriciale a 2 Dimensioni (evita crash di unpacking)
         final_pool = np.atleast_2d(final_pool)
@@ -820,6 +826,13 @@ class MapLogicNode(Node):
         
         best_idx_flat = np.argmax(scores)
         
+        best_scores = {
+            'total': float(scores[best_idx_flat]),
+            'frontality': float(norm_frontality[best_idx_flat]),
+            'relevance': float(norm_relevance[best_idx_flat]),
+            'distance': float(norm_dist_scores[best_idx_flat])
+        }
+        
         # --- FORMATTAZIONE A PROVA DI BOMBA ---
         # Estrae i valori appiattendo eventuali numpy array annidati e forzando gli int nativi
         best_row = np.array(final_pool[best_idx_flat]).flatten()
@@ -827,7 +840,7 @@ class MapLogicNode(Node):
         
         print("\n🎯 Target Selected:", best_idx)
         
-        return best_idx
+        return best_idx, best_scores
     
     
     """

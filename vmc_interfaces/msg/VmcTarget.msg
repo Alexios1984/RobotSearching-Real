@@ -1,2 +1,6 @@
 std_msgs/Header header
 geometry_msgs/Point target_position
+float64 score_total
+float64 score_frontality
+float64 score_relevance
+float64 score_distance
