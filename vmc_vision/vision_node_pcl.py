@@ -28,7 +28,7 @@ class DepthVisionNode(Node):
         self.min_dist = 0.07            # Minimum distance to consider for detected obstacles (minimum distance Realsense)
         self.max_dist = 0.50            # Maximum distance to consider for detected obstacles (maximum distances Realsense)
         self.depth_scale = 0.001        # RealSense default (mm -> m)
-        self.decimation = 5             # Skip factor for trivially downsampling the depth image
+        self.decimation = 20             # Skip factor for trivially downsampling the depth image
         self.camera_info = None
 
         # ==========================
