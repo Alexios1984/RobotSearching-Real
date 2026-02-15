@@ -70,7 +70,7 @@ class MapLogicNode(Node):
         
         
         
-        # ------------- Booxes Case ----------------------------------------------------------
+        # ------------- Boxes Case ----------------------------------------------------------
 
         if self.type_experiment == "boxes":
 
@@ -265,9 +265,6 @@ class MapLogicNode(Node):
         self.pub_obstacles = self.create_publisher(                 # Set of obstacles
             VmcObstacles, '/vmc/active_obstacles', 10)
 
-        # self.pub_debug_pcl = self.create_publisher(                 # Pointcloud filtered (within the workspace)
-        #     PointCloud2, '/vmc/debug_obstacles', 10)
-
         self.pub_repulsors_viz = self.create_publisher(             # Markers that represent the repulsor used by VMC
             Marker, '/vmc/repulsors_viz', 10)
         
@@ -400,10 +397,7 @@ class MapLogicNode(Node):
                     # --- CASE 1: First Deadlock (Try Recovery) ---
                     if not self.is_recovering:
                         
-                        if self.type_experiment != "shelves": 
-                            intermediate_coords = self.find_recovery_voxel(curr_idx, self.RECOVERY_MIN_DIST, self.RECOVERY_MAX_DIST)
-                        else:
-                            intermediate_coords = (int(self.N_VOXELS_X/2), int(self.N_VOXELS_Y/2), int(self.N_VOXELS_Z/2))
+                        intermediate_coords = self.find_recovery_voxel(curr_idx, self.RECOVERY_MIN_DIST, self.RECOVERY_MAX_DIST)
 
                         if intermediate_coords is not None:
                             self.get_logger().warn(f"⚠️ Deadlock! Trying recovery at {intermediate_coords}")
@@ -639,9 +633,7 @@ class MapLogicNode(Node):
         
         # Create the pointcloud with all the filtered points
         pc2_msg = pc2.create_cloud_xyz32(debug_header, valid_points)
-        
-        # Publish the filtered pointcloud
-        # self.pub_debug_pcl.publish(pc2_msg)
+
         
         
         # --- 8. Downsampling ---
@@ -928,7 +920,6 @@ class MapLogicNode(Node):
     """
     def find_recovery_voxel(self, target_idx, min_dist, max_dist):
         cx, cy, cz = target_idx
-        target_pos = self.grid_to_world(cx, cy, cz)
 
         # 1. Define the Bounding Box limits in voxel indices
         r_vox_max = int(np.ceil(max_dist / self.res_x))
