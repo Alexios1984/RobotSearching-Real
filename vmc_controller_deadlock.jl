@@ -137,25 +137,25 @@ robot = parseURDF(joinpath(module_path, "URDFs/franka_description/urdfs/fr3_fran
 
 add_gravity_compensation!(robot, VMRobotControl.DEFAULT_GRAVITY)
 
-joint_limits = cfg.joint_limits
-for (i, τ_coulomb) in zip(1:7, [5.0, 5.0, 5.0, 5.0, 3.0, 3.0, 3.0])
-    jname = "fr3_joint$i"
-    cid = "J$i"
-    add_coordinate!(robot, JointSubspace(jname); id=cid)
-    limits = joint_limits[jname]
-    if !isnothing(limits) && !isnothing(limits.lower) && !isnothing(limits.upper)
-        add_deadzone_springs!(robot, 80.0, (limits.lower+0.1, limits.upper-0.1), cid)
-    end
-    add_component!(robot, TanhDamper(τ_coulomb, 1e-1, cid); id="JDamp$i")
-    add_component!(robot, LinearDamper(5.0, cid); id="ViscousDamp$i")
-end
-
 
 # -- Virtual Mechanism System --
 
 vms = VirtualMechanismSystem("franka_impedance_control", robot)
 
+offset = 0.5
+stiffness_limits = 20.0
 
+upper_L = Float64[]
+lower_L = Float64[]
+
+joint_limits = cfg.joint_limits
+for i in 1:7
+    jname = "fr3_joint$i"
+    limits = joint_limits[jname]
+    push!(upper_L, limits.upper-offset)
+    push!(lower_L, limits.lower+offset)
+    add_coordinate!(robot, JointSubspace("fr3_joint$i");    id="JointValue$i")
+end
 
 # ======================================
 # --- VMC Creation ---
@@ -173,23 +173,24 @@ add_joint!(robot, Rigid(CAMERA_OFFSET); parent="fr3_hand_tcp", child="camera_fra
 add_coordinate!(robot, FrameOrigin("camera_frame"); id="camera_position")                                       # Camera Position Coordinate
 add_coordinate!(robot, FramePoint("camera_frame", SVector(0.0, 0.0, DIST_NOSE)); id="camera_nose")              # Camera Nose Coordinate
 
-add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_attractor")                        # Target Attractor Coordinate
+add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.0, 0.4, 0.4))); id="target_attractor")                        # Target Attractor Coordinate (Front to Workspace)
+# add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_attractor")                        # Target Attractor Coordinate (Front to PC)
 
 
 # --- Attraction to Target ---
 
 add_coordinate!(vms, CoordDifference("target_attractor", ".robot.camera_nose"); id="cam_to_target_error")
 
-CAM_TO_TARG_STIFF = 200.0
-CAM_TO_TARG_MAXFORCE = 20.0
-CAM_TO_TARG_DAMPING = 12.0
+CAM_TO_TARG_STIFF = 250.0
+CAM_TO_TARG_MAXFORCE = 25.0
+CAM_TO_TARG_DAMPING = 10.0
 add_component!(vms, TanhSpring("cam_to_target_error"; max_force=CAM_TO_TARG_MAXFORCE, stiffness=CAM_TO_TARG_STIFF); id="attraction_spring")
 add_component!(vms, LinearDamper(CAM_TO_TARG_DAMPING * identity(3), "cam_to_target_error"); id="attraction_damper")
 
 
 # --- Obstacle Repulsors for Camera ---
 
-const REPULSION_MAXFORCE = -10.0
+const REPULSION_MAXFORCE = -12.0
 const REPULSION_WIDTH = 0.04
 
 for i in 1:N_REPULSORS
@@ -285,13 +286,16 @@ function f_setup(cache)
 
     floor_repulsors_handle = [cache[get_compiled_coordID(cache, fl_rep_id)].coord_data.val for fl_rep_id in floor_repulsor_ids]
 
-    
-    return (target_id, repulsor_ids, cam_frame_id, link_coords_ids, floor_repulsors_handle)
+    joint_ids = [get_compiled_coordID(cache, ".robot.JointValue$i") for i in 1:7]
+
+    return (target_id, repulsor_ids, cam_frame_id, link_coords_ids, floor_repulsors_handle, joint_ids)
 end
 
 function f_control(cache, t, args, dt)
 
-    (target_id, repulsor_ids, _, link_coords_ids, floor_repulsors_handle) = args
+    (target_id, repulsor_ids, _, link_coords_ids, floor_repulsors_handle, joint_ids) = args
+
+    u_robot = Float64[]
 
     # Non-blocking check for new target data
     if isready(target_channel)
@@ -337,6 +341,40 @@ function f_control(cache, t, args, dt)
         end
 
     end
+
+    # Limit Avoidance
+
+    current_joint_vals = [configuration(cache, id) for id in joint_ids]
+
+    for i in 1:7
+
+        val = current_joint_vals[i][1]
+        
+        # 1. Controllo Limite Inferiore
+        if val < lower_L[i]
+            # Il giunto è troppo basso -> spingiamo verso il positivo
+            force_lower = stiffness_limits * (lower_L[i] - val)
+        else
+            # Siamo sopra il minimo -> nessuna forza dal limite inferiore
+            force_lower = 0.0
+        end
+
+        # 2. Controllo Limite Superiore
+        if val > upper_L[i]
+            # Il giunto è troppo alto -> spingiamo verso il negativo (upper - val sarà negativo)
+            force_upper = stiffness_limits * (upper_L[i] - val)
+        else
+            # Siamo sotto il massimo -> nessuna forza dal limite superiore
+            force_upper = 0.0
+        end 
+
+        # Somma le componenti (una delle due sarà sempre 0, a meno che i limiti non siano invertiti)
+        push!(u_robot, (force_lower + force_upper))
+
+    end 
+
+    return u_robot
+
 end
 
 
@@ -487,10 +525,13 @@ function ros_vm_controller(
                 q̇ʳ = latest_state_array[NDOF+1:2*NDOF]
                 
                 # Logic Step
-                f_control(control_cache, t, args, dt) 
+                u_robot = f_control(control_cache, t, args, dt) 
                 
                 # Physics Step
                 desired_torques = control_step!(control_cache, t, qʳ, q̇ʳ) 
+
+                # Limit Avoidance
+                desired_torques += u_robot
                 
                 # ========================
                 # ---- Publish Torques ---
