@@ -8,7 +8,7 @@ from scipy.spatial import cKDTree
 from scipy.ndimage import binary_dilation
 
 # ROS Messages
-from vmc_interfaces.msg import ObjectDetection3DArray, VmcRobotState, VmcObstacles, VmcTarget, VmcMapConfig
+from vmc_interfaces.msg import ObjectDetection3DArray, VmcRobotState, VmcObstacles, VmcTarget, VmcMapConfig, VmcMapStats
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Header, ColorRGBA, Float64MultiArray
 from visualization_msgs.msg import Marker
@@ -287,6 +287,9 @@ class MapLogicNode(Node):
             VmcMapConfig, '/vmc/log/config', 1) 
 
         self.publish_experiment_config()                            # Publish the experiment configuration
+        
+        self.pub_map_stats = self.create_publisher(                 # Map Statistics
+            VmcMapStats, '/vmc/log/map_stats', 10)
 
 
 
@@ -467,6 +470,13 @@ class MapLogicNode(Node):
                     msg.target_position.x = float(target_pos[0])
                     msg.target_position.y = float(target_pos[1])
                     msg.target_position.z = float(target_pos[2])
+                    msg.grid_x = int(curr_idx[0])
+                    msg.grid_y = int(curr_idx[1])
+                    msg.grid_z = int(curr_idx[2])
+                    msg.score_total = best_scores['total']
+                    msg.score_frontality = best_scores['frontality']
+                    msg.score_relevance = best_scores['relevance']
+                    msg.score_distance = best_scores['distance']
 
                     self.pub_target.publish(msg)
                     return
@@ -492,12 +502,12 @@ class MapLogicNode(Node):
                     self.last_deadlock_pos = None  
                     
                     # Now that we have done a reset we can search for a new target 
-                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
+                    best_idx, best_scores = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
 
                 if best_idx is None:
                      
                     self.get_logger().warn("⚠️ No safe or ignored voxels available: Wall Skin Filter Off.")
-                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
+                    best_idx, best_scores = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
 
             if best_idx:
                 self.current_target_idx = best_idx
@@ -511,7 +521,9 @@ class MapLogicNode(Node):
                 msg.target_position.x = target_pos[0]
                 msg.target_position.y = target_pos[1]
                 msg.target_position.z = target_pos[2]
-                
+                msg.grid_x = int(curr_idx[0])
+                msg.grid_y = int(curr_idx[1])
+                msg.grid_z = int(curr_idx[2])
                 msg.score_total = best_scores['total']
                 msg.score_frontality = best_scores['frontality']
                 msg.score_relevance = best_scores['relevance']
@@ -1669,13 +1681,16 @@ class MapLogicNode(Node):
         
         total_voxels = self.N_VOXELS_X * self.N_VOXELS_Y * self.N_VOXELS_Z                  # Total number of voxels
         
-        mask_explored = (self.grid < self.VAL_FREE) | (self.grid > self.VAL_OCCUPIED)       # Set to 1 for each non-empty voxel
+        mask_free = self.grid < self.VAL_FREE
+        mask_occupied = self.grid > self.VAL_OCCUPIED
+        mask_unknown = (self.grid >= self.VAL_FREE) & (self.grid <= self.VAL_OCCUPIED)
         
-        explored_count = np.count_nonzero(mask_explored)                                    # Total number of non-empty voxels
+        free_count = int(np.count_nonzero(mask_free))
+        occupied_count = int(np.count_nonzero(mask_occupied))
+        unknown_count = int(np.count_nonzero(mask_unknown))
         
-        # Percentage Computation
+        explored_count = free_count + occupied_count
         percentage = (explored_count / total_voxels) * 100.0
-
 
         # --- 2. Creation Text Marker ---
         
@@ -1706,8 +1721,19 @@ class MapLogicNode(Node):
             self.get_logger().info("Reached 95%", " of the exploration at t: %s", self.get_clock().now().to_string)
             self.pub_completion_time.publish(self.get_clock().now().to_msg())
 
-
         self.pub_status_text.publish(marker)
+        
+        # --- 2. Publish Statistics Topic ---
+        msg_stats = VmcMapStats()
+        msg_stats.header.stamp = self.get_clock().now().to_msg()
+        msg_stats.header.frame_id = "fr3_link0"
+        
+        msg_stats.total_voxels = total_voxels
+        msg_stats.unknown_voxels = unknown_count
+        msg_stats.free_voxels = free_count
+        msg_stats.occupied_voxels = occupied_count
+        
+        self.pub_map_stats.publish(msg_stats)
 
 
     """

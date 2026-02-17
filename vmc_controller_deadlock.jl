@@ -33,6 +33,7 @@ const VmcTarget = pyimport("vmc_interfaces.msg").VmcTarget
 const VmcControlConfig = pyimport("vmc_interfaces.msg").VmcControlConfig
 const VmcTelemetry = pyimport("vmc_interfaces.msg").VmcTelemetry
 const Point = pyimport("geometry_msgs.msg").Point
+const VmcLinkPoses = pyimport("vmc_interfaces.msg").VmcLinkPoses
 const Vector3 = pyimport("geometry_msgs.msg").Vector3
 
 
@@ -420,6 +421,9 @@ function ros_vm_controller(
         # Telemetry Publisher
         telemetry_pub = node.create_publisher(VmcTelemetry, "/vmc/telemetry", 10)
 
+        # Link Poses Publisher
+        poses_pub = node.create_publisher(VmcLinkPoses, "/vmc/link_poses", 10)
+
         println("DEBUG [1.1]: Publishers created.")
         
         
@@ -498,11 +502,22 @@ function ros_vm_controller(
             rethrow(e)
         end
 
+        # --- Estrai i nomi validi per il publisher delle posizioni ---
+        valid_link_names = String[]
+        for name in TOTAL_COLLISION_FRAMES
+            try
+                VMRobotControl.get_compiled_coordID(control_cache, ".robot.$(name)_pos")
+                push!(valid_link_names, name)
+            catch
+            end
+        end
+
 
         # --- Control Function ---
         
         control_func! = let control_cache=control_cache, args=args, node=node, 
-                            torque_publisher=torque_publisher, state_publisher=state_publisher, deadlock_pub=deadlock_pub, telemetry_pub=telemetry_pub
+                            torque_publisher=torque_publisher, state_publisher=state_publisher, deadlock_pub=deadlock_pub, telemetry_pub=telemetry_pub,
+                            valid_link_names=valid_link_names, poses_pub=poses_pub, 
                             cam_frame_id=cam_frame_id, link_coords_ids=link_coords_ids
             
             function control_func!(t, dt)
@@ -730,6 +745,50 @@ function ros_vm_controller(
                     println("⚠️ Error publishing telemetry: $e")
                 end
 
+                # ========================
+                # --- Publish Link Poses ---
+                # ========================
+                try
+                    msg_poses = VmcLinkPoses()
+                    msg_poses.header.stamp = node.get_clock().now().to_msg()
+                    msg_poses.header.frame_id = "fr3_link0"
+
+                    py_names = []
+                    py_points = []
+
+                    # 1. Aggiungi la Telecamera (Camera Frame)
+                    cam_tf = VMRobotControl.get_transform(control_cache, cam_frame_id)
+                    push!(py_names, "camera_frame")
+                    
+                    p_cam = Point()
+                    p_cam.x = float(cam_tf.origin[1])
+                    p_cam.y = float(cam_tf.origin[2])
+                    p_cam.z = float(cam_tf.origin[3])
+                    push!(py_points, p_cam)
+
+                    # 2. Aggiungi tutti i Link e i Punti Extra (Fingers, Gomiti, ecc.)
+                    for (i, cid) in enumerate(link_coords_ids)
+                        # Estraiamo la posizione (x, y, z) del FrameOrigin
+                        pos = VMRobotControl.configuration(control_cache, cid)
+                        
+                        push!(py_names, valid_link_names[i])
+                        
+                        p = Point()
+                        p.x = float(pos[1])
+                        p.y = float(pos[2])
+                        p.z = float(pos[3])
+                        push!(py_points, p)
+                    end
+
+                    # Converti gli array in liste Python compatibili col messaggio ROS
+                    msg_poses.link_names = pylist(py_names)
+                    msg_poses.link_positions = pylist(py_points)
+                    
+                    poses_pub.publish(msg_poses)
+                    
+                catch e
+                    println("⚠️ Error publishing link poses: $e")
+                end
 
                 return false
             end

@@ -8,7 +8,7 @@ from scipy.spatial import cKDTree
 from scipy.ndimage import binary_dilation
 
 # ROS Messages
-from vmc_interfaces.msg import ObjectDetection3DArray, VmcRobotState, VmcObstacles, VmcTarget, VmcMapConfig
+from vmc_interfaces.msg import ObjectDetection3DArray, VmcRobotState, VmcObstacles, VmcTarget, VmcMapConfig, VmcMapStats
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Header, ColorRGBA, Float64MultiArray
 from visualization_msgs.msg import Marker
@@ -467,6 +467,14 @@ class MapLogicNode(Node):
                     msg.target_position.x = float(target_pos[0])
                     msg.target_position.y = float(target_pos[1])
                     msg.target_position.z = float(target_pos[2])
+                    msg.grid_x = int(curr_idx[0])
+                    msg.grid_y = int(curr_idx[1])
+                    msg.grid_z = int(curr_idx[2])
+                    msg.score_total = best_scores['total']
+                    msg.score_frontality = best_scores['frontality']
+                    msg.score_relevance = best_scores['relevance']
+                    msg.score_distance = best_scores['distance']
+                    
 
                     self.pub_target.publish(msg)
                     return
@@ -492,12 +500,12 @@ class MapLogicNode(Node):
                     self.last_deadlock_pos = None  
                     
                     # Now that we have done a reset we can search for a new target 
-                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
+                    best_idx, best_scores = self.find_best_unknown_target(cam_pos, allow_risky_skin=False)
 
                 if best_idx is None:
                      
                     self.get_logger().warn("⚠️ No safe or ignored voxels available: Wall Skin Filter Off.")
-                    best_idx = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
+                    best_idx, best_scores = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
 
             if best_idx:
                 self.current_target_idx = best_idx
@@ -512,6 +520,10 @@ class MapLogicNode(Node):
                 msg.target_position.y = target_pos[1]
                 msg.target_position.z = target_pos[2]
                 
+                msg.grid_x = int(curr_idx[0])
+                msg.grid_y = int(curr_idx[1])
+                msg.grid_z = int(curr_idx[2])
+            
                 msg.score_total = best_scores['total']
                 msg.score_frontality = best_scores['frontality']
                 msg.score_relevance = best_scores['relevance']
@@ -1371,24 +1383,56 @@ class MapLogicNode(Node):
     def publish_experiment_config(self):
         msg = VmcMapConfig()
         msg.header.stamp = self.get_clock().now().to_msg()
-        
-        msg.workspace_bounds_x = [float(self.WS_BOUNDS['x'][0]), float(self.WS_BOUNDS['x'][1])]
-        msg.workspace_bounds_y = [float(self.WS_BOUNDS['y'][0]), float(self.WS_BOUNDS['y'][1])]
-        msg.workspace_bounds_z = [float(self.WS_BOUNDS['z'][0]), float(self.WS_BOUNDS['z'][1])]
-        
-        msg.voxel_size = float(self.TARGET_VOXEL_SIZE)
-        msg.hit_increment = float(self.HIT_INC)
-        msg.miss_decrement = float(self.MISS_DEC)
-        msg.val_occupied_thresh = int(self.VAL_OCCUPIED)
-        msg.val_free_thresh = int(self.VAL_FREE)
+        msg.header.frame_id = "fr3_link0"
 
+        # Workspace Configuration
+        msg.type_experiment = self.type_experiment
+        msg.ws_x_min = float(self.WS_BOUNDS['x'][0])
+        msg.ws_x_max = float(self.WS_BOUNDS['x'][1])
+        msg.ws_y_min = float(self.WS_BOUNDS['y'][0])
+        msg.ws_y_max = float(self.WS_BOUNDS['y'][1])
+        msg.ws_z_min = float(self.WS_BOUNDS['z'][0])
+        msg.ws_z_max = float(self.WS_BOUNDS['z'][1])
+        msg.target_voxel_size = float(self.TARGET_VOXEL_SIZE)
+        msg.n_voxels_x = int(self.N_VOXELS_X)
+        msg.n_voxels_y = int(self.N_VOXELS_Y)
+        msg.n_voxels_z = int(self.N_VOXELS_Z)
+
+        # Probabilistic Configuration
+        msg.val_min = int(self.VAL_MIN)
+        msg.val_max = int(self.VAL_MAX)
+        msg.val_unknown = int(self.VAL_UNKNOWN)
+        msg.val_occupied = int(self.VAL_OCCUPIED)
+        msg.val_free = int(self.VAL_FREE)
+        msg.val_lock = int(self.VAL_LOCK)
+        msg.hit_inc = int(self.HIT_INC)
+        msg.miss_dec = int(self.MISS_DEC)
+
+        # Camera Configuration
+        msg.fov_h = float(self.FOV_H)
+        msg.fov_v = float(self.FOV_V)
+        msg.max_depth = float(self.MAX_DEPTH)
+        msg.min_depth = float(self.MIN_DEPTH)
+
+        # Logic & Scores
+        msg.max_obstacles = int(self.MAX_OBSTACLES)
+        msg.min_distance_rep = float(self.min_distance_rep)
+        msg.min_points_per_voxel = int(self.min_points_per_voxel)
+        msg.score_frontality = float(self.SCORE_FRONTALITY)
         msg.score_relevance = float(self.SCORE_RELEVANCE)
         msg.score_distance = float(self.SCORE_DISTANCE)
-        msg.score_frontality = float(self.SCORE_FRONTALITY)
-        
-        self.pub_log_config.publish(msg)
-        self.get_logger().info("💾 Configurazione Log pubblicata.")
 
+        # Deadlock Configuration
+        msg.deadlock_vel_eps = float(self.DEADLOCK_VEL_EPS)
+        msg.deadlock_torque_eps = float(self.DEADLOCK_TORQUE_EPS)
+        msg.deadlock_time_threshold = float(self.DEADLOCK_TIME_THRESHOLD)
+        msg.deadlock_zone_radius = float(self.DEADLOCK_ZONE_RADIUS)
+        msg.deadlock_min_dist = float(self.DEADLOCK_MIN_DIST)
+        msg.recovery_min_dist = float(self.RECOVERY_MIN_DIST)
+        msg.recovery_max_dist = float(self.RECOVERY_MAX_DIST)
+
+        self.pub_log_config.publish(msg)
+        self.get_logger().info(f"💾 Full Configuration for '{self.type_experiment}' published.")
 
     """ 
     Draw the frustum attached to the camera and moving with it.
@@ -1624,11 +1668,15 @@ class MapLogicNode(Node):
         
         total_voxels = self.N_VOXELS_X * self.N_VOXELS_Y * self.N_VOXELS_Z                  # Total number of voxels
         
-        mask_explored = (self.grid < self.VAL_FREE) | (self.grid > self.VAL_OCCUPIED)       # Set to 1 for each non-empty voxel
+        mask_free = self.grid < self.VAL_FREE
+        mask_occupied = self.grid > self.VAL_OCCUPIED
+        mask_unknown = (self.grid >= self.VAL_FREE) & (self.grid <= self.VAL_OCCUPIED)
         
-        explored_count = np.count_nonzero(mask_explored)                                    # Total number of non-empty voxels
+        free_count = int(np.count_nonzero(mask_free))
+        occupied_count = int(np.count_nonzero(mask_occupied))
+        unknown_count = int(np.count_nonzero(mask_unknown))
         
-        # Percentage Computation
+        explored_count = free_count + occupied_count
         percentage = (explored_count / total_voxels) * 100.0
 
 
@@ -1658,11 +1706,23 @@ class MapLogicNode(Node):
         marker.text = f"Found {explored_count} / {total_voxels} Voxels"
         
         if percentage >= self.MINIMUM_EXPLORED_PERCENTAGE:
-            self.get_logger().info("Reached 95%", " of the exploration at t: %s", self.get_clock().now().to_string)
+            self.get_logger().info("Reached 95%", " of the exploration at t: %s", self.get_clock().now().to_msg().sec)
             self.pub_completion_time.publish(self.get_clock().now().to_msg())
 
 
         self.pub_status_text.publish(marker)
+        
+        # --- 2. Publish Statistics Topic ---
+        msg_stats = VmcMapStats()
+        msg_stats.header.stamp = self.get_clock().now().to_msg()
+        msg_stats.header.frame_id = "fr3_link0"
+        
+        msg_stats.total_voxels = total_voxels
+        msg_stats.unknown_voxels = unknown_count
+        msg_stats.free_voxels = free_count
+        msg_stats.occupied_voxels = occupied_count
+        
+        self.pub_map_stats.publish(msg_stats)
 
 
     """
