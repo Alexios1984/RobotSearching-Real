@@ -1,3 +1,5 @@
+# Log Message to get the VMC parameters
+
 std_msgs/Header header
 
 # Attraction Parameters

@@ -1,3 +1,30 @@
+# =================================================================================================================
+# PROJECT: VMC Autonomous Exploration and Mapping
+# FILE: map_zbuffer.py
+#
+# AUTHOR: Alessio Canzolino
+# DATE: February 2026
+#
+# DESCRIPTION:
+#
+#   This python script contain the code for the mapping node for the ROS2 environment. 
+#   This version is a variant of the map_pcl.py code. The difference is an escape routine
+#   triggered whenever the robot is in deadlock:
+#     When a target is unreachable, the node generates an intermediate target point 
+#     in the workspace, selecting randomly one of the free voxels in the gridmap.
+#     When the robot is close to this intermediate point then this means it escaped the 
+#     deadlock and then recovers the old target to try to reach it again from this new 
+#     position.
+#   If even with this escape point it isn't possible to reach it, then the target is finally
+#   marked as unreachable and the ignored zone is created.
+#   A ZBuffer used to avoid the robot to 'see' through voxels. Using this method whenever 
+#   a pointcloud is detected then the voxels behind it are considered hidden.  
+#
+#     [This is the official version for the experiments]
+#
+# =================================================================================================================
+
+
 import rclpy
 from rclpy.node import Node
 import numpy as np
@@ -8,7 +35,7 @@ from scipy.spatial import cKDTree
 from scipy.ndimage import binary_dilation
 
 # ROS Messages
-from vmc_interfaces.msg import ObjectDetection3DArray, VmcRobotState, VmcObstacles, VmcTarget, VmcMapConfig, VmcMapStats
+from vmc_interfaces.msg import VmcRobotState, VmcObstacles, VmcTarget, VmcMapConfig, VmcMapStats
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Header, ColorRGBA, Float64MultiArray
 from visualization_msgs.msg import Marker
@@ -35,7 +62,7 @@ Main node to manage the voxel grid mapping from point clouds.
 class MapLogicNode(Node):
     def __init__(self):
         
-        super().__init__('map_pcl_rand_esc')
+        super().__init__('zbuffer')
 
         self.node_start_time = None                 # Used not to go in deadlock at time 0.0
 
@@ -43,18 +70,22 @@ class MapLogicNode(Node):
         
         self.decision_lock = threading.Lock()       # Lock for decision loop
         
-        self.type_experiment = "boxes"
+        self.type_experiment = "strawberries"
         
         # ============================== 
         # --- Workspace Configuration ---
         # ==============================
         
-        # self.WS_BOUNDS = {                  # Test Workspace
-        #     'x': [-0.15, 0.44],   
-        #     'y': [ 0.68, 1.18],
-        #     'z': [ 0.03, 0.8]
-        # }
+        if self.type_experiment == "test":
+
+            self.WS_BOUNDS = {                  # Test Workspace
+                'x': [-0.15, 0.44],   
+                'y': [ 0.68, 1.18],
+                'z': [ 0.03, 0.8]
+            }
         
+            self.TARGET_VOXEL_SIZE = 0.05       # Test voxel size
+
 
         # ------------- Shelves Case ---------------------------------------------------------
         
@@ -62,11 +93,11 @@ class MapLogicNode(Node):
 
             self.WS_BOUNDS = {                  # Bounds for Shelves Case
                 'x': [-0.25, 0.55],   
-                'y': [ 0.4, 1.2],
+                'y': [ 0.4, 1.11],
                 'z': [ 0.03, 0.9]
             }
 
-            self.TARGET_VOXEL_SIZE = 0.05             # Voxel size in meters (Shelves Case)
+            self.TARGET_VOXEL_SIZE = 0.04       # Voxel size in meters (Shelves Case)
         
         
         
@@ -76,11 +107,11 @@ class MapLogicNode(Node):
 
             self.WS_BOUNDS = {                  # Bounds for Boxes Case
                 'x': [-0.24, 0.55],   
-                'y': [ 0.5, 1.0],
+                'y': [ 0.4, 1.1],
                 'z': [ 0.03, 0.40]
             }
 
-            self.TARGET_VOXEL_SIZE = 0.04             # Voxel size in meters (Boxes Case)
+            self.TARGET_VOXEL_SIZE = 0.03       # Voxel size in meters (Boxes Case)
 
         
         
@@ -91,11 +122,11 @@ class MapLogicNode(Node):
 
             self.WS_BOUNDS = {                  # Bounds for Strawberries Case
                 'x': [-0.15, 0.55],   
-                'y': [ 0.75, 1.1],
+                'y': [ 0.5, 1.0],
                 'z': [ 0.45, 0.85]
             }
 
-            self.TARGET_VOXEL_SIZE = 0.015             # Voxel size in meters (Strawberries Case)
+            self.TARGET_VOXEL_SIZE = 0.02       # Voxel size in meters (Strawberries Case)
 
         # -------------------------------------------------------------------------------------
 
@@ -132,16 +163,16 @@ class MapLogicNode(Node):
         # --- Bucket Tresholds ---
         
         self.VAL_MIN = 0                    # Empty bucket
-        self.VAL_MAX = 300                  # Full bucket
+        self.VAL_MAX = 350                  # Full bucket
         self.VAL_UNKNOWN = 55               # Default uncertainty level
         self.VAL_OCCUPIED = 90              # Min Threshold to say "It's occupied!"
         self.VAL_FREE = 20                  # Max Threshold to say "It's free for sure"
-        self.VAL_LOCK = 301                 # Once full, we don't decrease it anymore (for stability)
+        self.VAL_LOCK = self.VAL_MAX        # Once full, we don't decrease it anymore (for stability)
         
         
         # --- Bucket Quantities ---
         
-        self.HIT_INC = 20                  # How much water we add if we see an obstacle (Rapid Increment)
+        self.HIT_INC = 20                   # How much water we add if we see an obstacle (Rapid Increment)
         self.MISS_DEC = 5                   # How much water we lose if we see free space (Slow Decay)
 
 
@@ -162,7 +193,7 @@ class MapLogicNode(Node):
         self.FOV_H = np.deg2rad(float(self.GRID_W)) 
         self.FOV_V = np.deg2rad(float(self.GRID_W))
         self.MAX_DEPTH = 0.40               # Max depth to consider (meters). Less than the sensor max for performance (for safety) 
-        self.MIN_DEPTH = 0.07               # Min depth to consider (meters). Same as the sensor min for performance  
+        self.MIN_DEPTH = 0.08               # Min depth to consider (meters). Same as the sensor min for performance  
 
         # --- Logic Configuration ---
         
@@ -174,16 +205,19 @@ class MapLogicNode(Node):
 
         self.cb_group = ReentrantCallbackGroup()        # Lock for the group where all can access at the same time (for parallelization). The default group is the MutuallyExsclusiveCallbackGroup that means that just one per time can be executed
 
-        self.min_distance_rep = 0.06                  # Minimum distance between repulsors 
+        self.min_distance_rep = 0.045                   # Minimum distance between repulsors 
 
-        self.min_points_per_voxel = 2                  # Minimun number of points to be in a voxel to be considered occupied, otherwise it's just noise
+        self.min_points_per_voxel = 5                   # Minimun number of points to be in a voxel to be considered occupied, otherwise it's just noise
         
-        self.MINIMUM_EXPLORED_PERCENTAGE = 95.0         # Minimum completion of the grid to compare the result
+        
+        # --- Scores for the next target selection ---
+        
+        self.SCORE_FRONTALITY = 3.0                     # Score to prefer voxels close to robots' base
 
-        # Scores for the next target selection
-        self.SCORE_FRONTALITY = 1.0
-        self.SCORE_RELEVANCE = 2.0
-        self.SCORE_DISTANCE = 1.0
+        self.SCORE_DISTANCE = 1.0                       # Score to prefer voxels near the last camera position
+        
+        self.SCORE_RELEVANCE = 1.0                      # Score to prefer big clouds of unknown voxels to isolated unknown voxels
+        
         
         # --- Deadlock Configuration ---
         
@@ -219,7 +253,7 @@ class MapLogicNode(Node):
         
         self.RECOVERY_MIN_DIST = 0.15               # Min dist for random recovery voxel (meters)
         self.RECOVERY_MAX_DIST = 0.40               # Max dist for random recovery voxel (meters)
-        self.RECOVERY_REACH_TOLERANCE = 0.1        # Distance to consider the intermediate target reached
+        self.RECOVERY_REACH_TOLERANCE = 0.1         # Distance to consider the intermediate target reached
 
         # Check the initial number of unknown voxels for the discovery rate
         mask_initial_unknown = (self.grid >= self.VAL_FREE) & (self.grid <= self.VAL_OCCUPIED)
@@ -243,7 +277,7 @@ class MapLogicNode(Node):
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.sub_vision_filter, self.sub_robot_filter], 
             queue_size=25,          # queue_size=10: how many message to put in queue to search for a synchronization
-            slop=0.001               # slop=0.05: tollerance time
+            slop=0.01               # slop=0.05: tollerance time
         )
         self.ts.registerCallback(self.cb_synced_data)  # When the timestamps from the two subscribers a single synchronized callback is launched
         
@@ -279,14 +313,9 @@ class MapLogicNode(Node):
 
         self.pub_status_text = self.create_publisher(               # Completion Text
             Marker, '/vmc/status_text', 10)
-        
-        self.pub_completion_time = self.create_publisher(           # Completion Time
-            Marker, '/vmc/completion_time', 10)
 
         self.pub_log_config = self.create_publisher(                # Log Config
-            VmcMapConfig, '/vmc/log/config', 1) 
-
-        self.publish_experiment_config()                            # Publish the experiment configuration
+            VmcMapConfig, '/vmc/log/config_map', 1) 
         
         self.pub_map_stats = self.create_publisher(                 # Map Statistics
             VmcMapStats, '/vmc/log/map_stats', 10)
@@ -305,7 +334,10 @@ class MapLogicNode(Node):
         self.timer = self.create_timer(0.001, self.decision_loop, callback_group=self.cb_group)
         
         # Obstacles Timer
-        self.timer_obstacles = self.create_timer(0.1, self.publish_obstacles_worker, callback_group=self.cb_group)
+        self.timer_obstacles = self.create_timer(0.001, self.publish_obstacles_worker, callback_group=self.cb_group)
+
+        # Log Timer
+        self.timer_config = self.create_timer(2.0, self.publish_config_once, callback_group=self.cb_group)
     # -----------------------------------------------------------------------------------------------------------------------
 
 
@@ -344,8 +376,10 @@ class MapLogicNode(Node):
             # --- Discovery Rate Check ---
             # --------------------------------------
             
+            # Time to check the discovery rate
             dt_check = time.time() - self.last_discovery_check_time
             
+            # If it's time, compute the seen percentage in this time and if below the treshold then trigger the deadlock
             if dt_check > self.DISCOVERY_CHECK_INTERVAL:
                 
                 mask_unknown = (self.grid > self.VAL_FREE) & (self.grid < self.VAL_OCCUPIED)
@@ -360,13 +394,15 @@ class MapLogicNode(Node):
                     if discovery_rate < self.MIN_DISCOVERY_RATE:
                         self.is_deadlocked = True
                 
-                # 5. Aggiorna lo stato per il prossimo giro
+                # Update the state for next
                 self.last_discovery_check_time = time.time()
                 self.unknown_count_last_check = current_unknown_count
             
+
             # --------------------------------------
             # --- Recovery Monitoring ---
             # --------------------------------------
+
             # Check if we reached the intermediate recovery voxel
             if self.is_recovering and not self.has_reached_intermediate and curr_idx is not None:
                 curr_voxel_pos = self.grid_to_world(*curr_idx)
@@ -380,7 +416,7 @@ class MapLogicNode(Node):
                 dist_to_intermediate = np.linalg.norm(nose_pos_world - curr_voxel_pos)
                 
                 if dist_to_intermediate < self.RECOVERY_REACH_TOLERANCE:
-                    self.get_logger().info("🔄 Reached intermediate recovery voxel. Retrying original target!")
+                    # self.get_logger().info("🔄 Reached intermediate recovery voxel. Retrying original target!")
                     
                     # Switch back to the original target
                     self.current_target_idx = self.original_stuck_target
@@ -394,17 +430,19 @@ class MapLogicNode(Node):
             # --------------------------------------
             # --- Deadlock Management ---
             # --------------------------------------
+
             if self.is_deadlocked:
                 if curr_idx is not None:
                     
                     # --- CASE 1: First Deadlock (Try Recovery) ---
+
                     if not self.is_recovering:
                         
                         intermediate_coords = self.find_recovery_voxel(curr_idx, self.RECOVERY_MIN_DIST, self.RECOVERY_MAX_DIST)
 
 
                         if intermediate_coords is not None:
-                            self.get_logger().warn(f"⚠️ Deadlock! Trying recovery at {intermediate_coords}")
+                            # self.get_logger().warn(f"⚠️ Deadlock! Trying recovery at {intermediate_coords}")
                             
                             # Setup Recovery
                             self.is_recovering = True
@@ -418,10 +456,12 @@ class MapLogicNode(Node):
                         
                         # If it fails to find a recovery voxel, it falls through to Case 2 (Ban)
                         
+
                     # --- CASE 2: Deadlock during Recovery (Ban Original Target) ---
+
                     # Use the original target for the ban, not the intermediate one
                     target_to_ban = self.original_stuck_target if self.original_stuck_target is not None else curr_idx
-                    self.get_logger().warn(f"🚫 Target {target_to_ban} in DEADLOCK (Recovery failed). Banning zone!")
+                    # self.get_logger().warn(f"🚫 Target {target_to_ban} in DEADLOCK (Recovery failed). Banning zone!")
                     
                     zone_indices = self.create_ignored_zone(target_to_ban)
                     for idx in zone_indices:
@@ -436,8 +476,9 @@ class MapLogicNode(Node):
                     self.current_target_idx = None
                     
                 else:
-                    self.get_logger().warn("WARNING Deadlock Phantom. Reset.")
-                    
+                    # self.get_logger().warn("WARNING Deadlock Phantom. Reset.")
+                    pass 
+
                 self.is_deadlocked = False
                 self.last_moving_time = time.time()
                 return 
@@ -458,7 +499,7 @@ class MapLogicNode(Node):
                     is_resolved = (current_val > self.VAL_OCCUPIED)
                 
                 if is_resolved:
-                    self.get_logger().info(f"✅ TARGET {curr_idx} Solved! (Val: {current_val}). Finding a new one.")
+                    # self.get_logger().info(f"✅ TARGET {curr_idx} Solved! (Val: {current_val}). Finding a new one.")
                     self.current_target_idx = None      
                 else:
                     # Publish the target and wait
@@ -473,10 +514,6 @@ class MapLogicNode(Node):
                     msg.grid_x = int(curr_idx[0])
                     msg.grid_y = int(curr_idx[1])
                     msg.grid_z = int(curr_idx[2])
-                    msg.score_total = best_scores['total']
-                    msg.score_frontality = best_scores['frontality']
-                    msg.score_relevance = best_scores['relevance']
-                    msg.score_distance = best_scores['distance']
 
                     self.pub_target.publish(msg)
                     return
@@ -495,7 +532,7 @@ class MapLogicNode(Node):
                 
                 if len(self.ignored_targets) > 0:           # Check if there is any ignored voxel
                     
-                    self.get_logger().warn(f"♻️ No targets. Reset (ignore_list + Deadlock Pos).")
+                    # self.get_logger().warn(f"♻️ No targets. Reset (ignore_list + Deadlock Pos).")
                     
                     # Reset the ignored voxels list and the target 
                     self.ignored_targets.clear()
@@ -506,7 +543,7 @@ class MapLogicNode(Node):
 
                 if best_idx is None:
                      
-                    self.get_logger().warn("⚠️ No safe or ignored voxels available: Wall Skin Filter Off.")
+                    # self.get_logger().warn("⚠️ No safe or ignored voxels available: Wall Skin Filter Off.")
                     best_idx, best_scores = self.find_best_unknown_target(cam_pos, allow_risky_skin=True)    
 
             if best_idx:
@@ -521,9 +558,9 @@ class MapLogicNode(Node):
                 msg.target_position.x = target_pos[0]
                 msg.target_position.y = target_pos[1]
                 msg.target_position.z = target_pos[2]
-                msg.grid_x = int(curr_idx[0])
-                msg.grid_y = int(curr_idx[1])
-                msg.grid_z = int(curr_idx[2])
+                msg.grid_x = int(best_idx[0])
+                msg.grid_y = int(best_idx[1])
+                msg.grid_z = int(best_idx[2])
                 msg.score_total = best_scores['total']
                 msg.score_frontality = best_scores['frontality']
                 msg.score_relevance = best_scores['relevance']
@@ -581,6 +618,8 @@ class MapLogicNode(Node):
         # --- 3. Clean Empty Space ---
         
         # "Empty" the cone in front of the camera before filling it with new obstacles.
+        # This new version of the function needs to know where the points of the pointcloud
+        # are to simulate an occlusion of voxels
         self.update_free_space_in_fov(T_world_cam, points_cam)
 
         
@@ -614,6 +653,7 @@ class MapLogicNode(Node):
         if valid_points.shape[0] == 0:
             return
         
+
         # --- 6. Filter Isolated Points ---
         
         res_filter = self.res_x         # Resolution of the map (can be decreased to have a better resolution)
@@ -660,7 +700,7 @@ class MapLogicNode(Node):
         step = 1                                # Take a point each 'step' points  
         final_points = valid_points[::step]     # Downsalmpled set of points
         
-        # Update repulsors' list ############################################################################################################################################################################################################################
+        # Update repulsors' list 
         self.current_visible_obstacles = final_points 
 
 
@@ -705,6 +745,7 @@ class MapLogicNode(Node):
         SELECTION_TRESHOLD = self.VAL_FREE + 15
         
         # --- 1. Candidate Selection ---
+
         mask_unknown = (self.grid >= SELECTION_TRESHOLD) & (self.grid <= self.VAL_OCCUPIED)
 
         # --- 2. Wall Skin Protection ---
@@ -713,7 +754,7 @@ class MapLogicNode(Node):
         if allow_risky_skin:
 
             mask_final_candidates = mask_unknown
-            self.get_logger().info("⚠️ Searching inside WALL SKINS (Risky Mode).")
+            # self.get_logger().info("⚠️ Searching inside WALL SKINS (Risky Mode).")
         
         else:
             
@@ -777,7 +818,7 @@ class MapLogicNode(Node):
 
         if self.last_deadlock_pos is not None:
 
-            # Vettorizzazione distanze per il deadlock
+            # Vectorize distances for the deadlock 
             ix, iy, iz = candidates[:, 0], candidates[:, 1], candidates[:, 2]
             pts_x = self.WS_BOUNDS['x'][0] + (ix + 0.5) * self.res_x
             pts_y = self.WS_BOUNDS['y'][0] + (iy + 0.5) * self.res_y
@@ -792,7 +833,7 @@ class MapLogicNode(Node):
             if len(safe_candidates) > 0:
                 final_pool = safe_candidates
             else:
-                self.get_logger().warn("⚠️ No Safe Target Found! Choosing in the Risky Pool.")
+                # self.get_logger().warn("⚠️ No Safe Target Found! Choosing in the Risky Pool.")
                 final_pool = candidates
                 is_risky = True
         
@@ -805,12 +846,12 @@ class MapLogicNode(Node):
             rand_idx = np.random.choice(len(final_pool), 500, replace=False)
             final_pool = final_pool[rand_idx]
 
+
         # --- 5. Scoring Loop (Completamente Vettorizzato) ---
 
         if len(final_pool) == 0:
             return None, None
 
-        # Garantisce la forma matriciale a 2 Dimensioni (evita crash di unpacking)
         final_pool = np.atleast_2d(final_pool)
 
         ix, iy, iz = final_pool[:, 0], final_pool[:, 1], final_pool[:, 2]
@@ -834,7 +875,7 @@ class MapLogicNode(Node):
         # C. Relevance
         norm_relevance = np.array([self.get_relevance(x, y, z) for x, y, z in final_pool])
 
-        # Scores Finale
+        # Scores Final
         scores = (self.SCORE_FRONTALITY * norm_frontality) + (self.SCORE_RELEVANCE * norm_relevance) + (self.SCORE_DISTANCE * norm_dist_scores)
         
         best_idx_flat = np.argmax(scores)
@@ -845,14 +886,11 @@ class MapLogicNode(Node):
             'relevance': float(norm_relevance[best_idx_flat]),
             'distance': float(norm_dist_scores[best_idx_flat])
         }
-        
-        
-        # --- FORMATTAZIONE A PROVA DI BOMBA ---
-        # Estrae i valori appiattendo eventuali numpy array annidati e forzando gli int nativi
+
         best_row = np.array(final_pool[best_idx_flat]).flatten()
         best_idx = (int(best_row[0]), int(best_row[1]), int(best_row[2]))
         
-        print("\n🎯 Target Selected:", best_idx)
+        # print("\n🎯 Target Selected:", best_idx)
         
         return best_idx, best_scores
     
@@ -895,7 +933,7 @@ class MapLogicNode(Node):
             # If we exceed the possible time to stay in deadlock without triggering the deadlock routine 
             if time_stuck > self.DEADLOCK_TIME_THRESHOLD:
                 if not self.is_deadlocked and self.current_target_idx is not None:
-                    self.get_logger().warn(f"WARNING DEADLOCK DETECTED! Blocked for {time_stuck:.1f}s. Resetting target.")
+                    # self.get_logger().warn(f"WARNING DEADLOCK DETECTED! Blocked for {time_stuck:.1f}s. Resetting target.")
                     self.is_deadlocked = True
 
     
@@ -905,7 +943,7 @@ class MapLogicNode(Node):
     """
     def publish_obstacles_worker(self):
         
-        # 1. Ottieni gli ostacoli ottimizzati (Spatial Hashing + Sorting)
+        # Get the obstacles from the ad-hoc function
         optimized_obstacles = self.get_downsampled_obstacles()
         
         msg = VmcObstacles()
@@ -942,14 +980,14 @@ class MapLogicNode(Node):
     
     
     """
-    Finds a FREE voxel at a specific distance from the target.
-    OTTIMIZZATA: Estrazione matriciale pura (Zero cicli For)
+    Finds a FREE voxel at a specific distance from the target to escape the deadlock.
     """
     def find_recovery_voxel(self, target_idx, min_dist, max_dist):
+
         cx, cy, cz = target_idx
         target_pos = self.grid_to_world(cx, cy, cz)
 
-        # 1. Limiti del Bounding Box (Cubo in indici)
+        # 1. Limit of Bounding Box
         r_vox_max = int(np.ceil(max_dist / self.res_x))
         
         ix_min = max(0, cx - r_vox_max)
@@ -961,48 +999,37 @@ class MapLogicNode(Node):
 
         if ix_min > ix_max or iy_min > iy_max or iz_min > iz_max:
             return None
-
-        # =========================================================
-        # 2. ESTRAZIONE VETTORIZZATA
-        # =========================================================
-        # Ritagliamo il blocco 3D di interesse dalla griglia principale
-        # (+1 perché lo slicing in Python esclude l'estremo superiore)
+        
+        # Shrink the allowed space to get the free voxels from
         sub_grid = self.grid[ix_min:ix_max+1, iy_min:iy_max+1, iz_min:iz_max+1]
         
-        # Troviamo TUTTI gli indici dei voxel LIBERI in una frazione di millisecondo
+        # Get free indices
         local_free_indices = np.argwhere(sub_grid <= self.VAL_FREE)
         
         if len(local_free_indices) == 0:
-            self.get_logger().warn("Nessun voxel libero nel raggio di recovery.")
+            # self.get_logger().warn("Nessun voxel libero nel raggio di recovery.")
             return None
 
-        # Convertiamo gli indici locali in indici globali della mappa
         global_indices = local_free_indices + np.array([ix_min, iy_min, iz_min])
 
-        # =========================================================
-        # 3. FILTRO DISTANZA A CIAMBELLA (EXACT DISTANCE)
-        # =========================================================
-        # Calcoliamo le coordinate mondo per tutti i candidati in parallelo
+        # Get distances
         pts_x = self.WS_BOUNDS['x'][0] + (global_indices[:, 0] + 0.5) * self.res_x
         pts_y = self.WS_BOUNDS['y'][0] + (global_indices[:, 1] + 0.5) * self.res_y
         pts_z = self.WS_BOUNDS['z'][0] + (global_indices[:, 2] + 0.5) * self.res_z
-        
-        # Distanza al quadrato (evita np.linalg.norm che è lenta)
+
         dists_sq = (pts_x - target_pos[0])**2 + (pts_y - target_pos[1])**2 + (pts_z - target_pos[2])**2
         
-        # Maschera: teniamo solo i voxel tra min_dist e max_dist
+        # Mask: keep just the ones that are in the allowed distance range
         valid_mask = (dists_sq >= min_dist**2) & (dists_sq <= max_dist**2)
         
         final_candidates = global_indices[valid_mask]
 
         if len(final_candidates) == 0:
-            self.get_logger().warn("Nessun voxel rispetta i limiti di distanza min/max.")
+            # self.get_logger().warn("Nessun voxel rispetta i limiti di distanza min/max.")
             return None
 
-        # =========================================================
-        # 4. SCELTA FINALE
-        # =========================================================
-        # Peschiamo casualmente UN solo voxel dalla lista dei sopravvissuti perfetti
+        
+        # Final choice (random)
         choice_idx = np.random.choice(len(final_candidates))
         best_voxel = final_candidates[choice_idx]
         
@@ -1062,18 +1089,14 @@ class MapLogicNode(Node):
         if len(indices_to_ignore) > 0:
             new_zone = IgnoredZone(indices_to_ignore)
             self.ignored_zones.append(new_zone)
-            self.get_logger().warn(f"🚫 Created IGNOREZONE with {len(indices_to_ignore)} voxels (R={self.DEADLOCK_ZONE_RADIUS}m)")
+            # self.get_logger().warn(f"🚫 Created IGNOREZONE with {len(indices_to_ignore)} voxels (R={self.DEADLOCK_ZONE_RADIUS}m)")
             
         return indices_to_ignore
 
 
-   
     """
     Uses the analogy to the water buckets to update the empty space in the grid.
-    Do not iterate over all the voxels in the grid, skip the voxels where the water in it 
-    is zero, this means that they are more likely to be surely empty and then there's no 
-    need to check there.
-    Z-BUFFER OCCLUSION: Voxels hidden behind obstacles will not be cleared!
+    Z-BUFFER OCCLUSION (Raycasting Optimization): Voxels hidden behind obstacles will not be cleared!
     """
     def update_free_space_in_fov(self, T_world_cam, points_cam):
                 
@@ -1102,80 +1125,72 @@ class MapLogicNode(Node):
         pts_cam = pts_world @ T_cam_world[:3, :3].T + T_cam_world[:3, 3]
         x_c, y_c, z_c = pts_cam[:, 0], pts_cam[:, 1], pts_cam[:, 2]
 
-
-        # --- 3. Z-BUFFER OCCLUSION CULLING (NEW) ---
         
-        # Parametri Z-Buffer (risoluzione "schermo")
+        # --- 3. Frustum Base Check ---
         tan_h = np.tan(self.FOV_H / 2.0)
         tan_v = np.tan(self.FOV_V / 2.0)
 
-        # Inizializziamo lo schermo virtuale con la distanza massima
-        z_buffer = np.full((self.GRID_W, self.GRID_H), self.MAX_DEPTH)
-
-        # Proiettiamo la PointCloud (gli Ostacoli fisici) nello Z-Buffer
-        if points_cam is not None and len(points_cam) > 0:
-            pc_z = points_cam[:, 2]
-            
-            # Consideriamo solo i punti davanti alla camera
-            valid_z = pc_z > 0.01 
-            pc_x = points_cam[valid_z, 0]
-            pc_y = points_cam[valid_z, 1]
-            pc_z = pc_z[valid_z]
-
-            # Coordinate Proiettive (U, V) -> da -1.0 a +1.0
-            pc_u = pc_x / (pc_z * tan_h)
-            pc_v = pc_y / (pc_z * tan_v)
-
-            # Mappatura in "pixel" dello schermo virtuale
-            pc_bin_u = ((pc_u + 1.0) / 2.0 * self.GRID_W).astype(int)
-            pc_bin_v = ((pc_v + 1.0) / 2.0 * self.GRID_H).astype(int)
-
-            # Filtro per i pixel dentro lo schermo
-            valid_bins = (pc_bin_u >= 0) & (pc_bin_u < self.GRID_W) & (pc_bin_v >= 0) & (pc_bin_v < self.GRID_H)
-            
-            # Registriamo la profondità MINIMA dell'ostacolo per ogni pixel
-            np.minimum.at(z_buffer, (pc_bin_u[valid_bins], pc_bin_v[valid_bins]), pc_z[valid_bins])
-
-        # --- 4. Frustum & Occlusion Check for Voxels ---
-        
-        # Check base (il voxel è geometricamente dentro la piramide visiva?)
-        mask_fov_geom = (z_c > 0.05) & (z_c < self.MAX_DEPTH)
+        mask_fov_geom = (z_c > 0.05) & (z_c < self.MAX_DEPTH) & \
+                        (np.abs(x_c) < (z_c * tan_h)) & \
+                        (np.abs(y_c) < (z_c * tan_v))
         
         valid_indices_mask = np.zeros(len(x_c), dtype=bool)
 
+
+        # --- 4. Z-BUFFER OCCLUSION CULLING (KD-Tree Ray-Blocking) ---
+
         if np.any(mask_fov_geom):
+            
             v_x = x_c[mask_fov_geom]
             v_y = y_c[mask_fov_geom]
             v_z = z_c[mask_fov_geom]
+            v_cam = np.column_stack((v_x, v_y, v_z))
 
-            # Proiettiamo i Voxel nello stesso schermo virtuale
-            v_u = v_x / (v_z * tan_h)
-            v_v = v_y / (v_z * tan_v)
+            visible = np.ones(len(v_z), dtype=bool)
 
-            v_bin_u = ((v_u + 1.0) / 2.0 * self.GRID_W).astype(int)
-            v_bin_v = ((v_v + 1.0) / 2.0 * self.GRID_H).astype(int)
+            # If there are obstacles, check the occlusions
+            if points_cam is not None and len(points_cam) > 0:
+                
+                # Keep the obstacles point in front of the camera
+                obs_valid = points_cam[:, 2] > 0.05
+                obs_cam = points_cam[obs_valid]
 
-            # Il voxel è visibile nello schermo?
-            in_screen = (v_bin_u >= 0) & (v_bin_u < self.GRID_W) & (v_bin_v >= 0) & (v_bin_v < self.GRID_H)
+                if len(obs_cam) > 0:
+                    
+                    # Proiettiamo ostacoli e voxel su un piano z=1 (creiamo le "linee di vista" o raggi)
+                    # Aggiungiamo un epsilon per evitare divisioni per zero
+                    ray_obs = obs_cam[:, :2] / (obs_cam[:, 2:3] + 1e-6)
+                    ray_vox = v_cam[:, :2] / (v_cam[:, 2:3] + 1e-6)
 
-            # Tolleranza: essendo i voxel dei cubi, aggiungiamo la diagonale del voxel al controllo di occlusione
-            margin = self.TARGET_VOXEL_SIZE * 1.5 
+                    # Create a fast spatial KD-Tree to check the overlapping linesights 
+                    tree = cKDTree(ray_obs)
 
-            # Maschera temporanea per i voxel non occlusi
-            visible = np.zeros(len(v_z), dtype=bool)
-            
-            u_in = v_bin_u[in_screen]
-            v_in = v_bin_v[in_screen]
-            z_in = v_z[in_screen]
+                    # This tolerance is to reduce the rays merging the close ones depending on the voxels size
+                    angle_tolerance = (self.TARGET_VOXEL_SIZE / 2.0) / np.clip(v_z, 0.1, self.MAX_DEPTH)
+                    
+                    # Check the tree: find the closest obstacle
+                    dists, nearest_obs_idx = tree.query(ray_vox, k=1)
 
-            # IL CUORE DELL'OCCLUSIONE: La profondità del Voxel deve essere <= della profondità dell'ostacolo registrata nel pixel!
-            visible[in_screen] = z_in <= (z_buffer[u_in, v_in] + margin)
+                    # Flag to detect a collision
+                    angular_collision = dists < angle_tolerance
 
-            # Assegniamo i risultati alla maschera globale
+                    # Take the depth of the occluding obstacle
+                    z_obs_blocking = obs_cam[nearest_obs_idx, 2]
+
+                    # If the voxel is the same or close one take a margin to consider it occluded as it should be
+                    z_margin = self.TARGET_VOXEL_SIZE * 1.5
+
+                    # Flag for an occluded voxel
+                    is_occluded = angular_collision & (v_z > (z_obs_blocking + z_margin))
+
+                    visible = ~is_occluded
+
+            # Assign the flag
             valid_indices_mask[mask_fov_geom] = visible
             
             
         # --- 5. Water Bucket Analogy Application ---
+
         if np.any(valid_indices_mask):
             final_ix = ix[valid_indices_mask]
             final_iy = iy[valid_indices_mask]
@@ -1184,7 +1199,7 @@ class MapLogicNode(Node):
             current_vals = self.grid[final_ix, final_iy, final_iz]
             new_vals = np.clip(current_vals - self.MISS_DEC, self.VAL_MIN, self.VAL_MAX)
             self.grid[final_ix, final_iy, final_iz] = new_vals
-
+    
 
     """
     Check all the ignored zones and if the 10% of them has been seen then free the entire zone
@@ -1211,10 +1226,10 @@ class MapLogicNode(Node):
             
             # Percentage Computation
             percentage = resolved_count / zone.total_count
-            
+            # self.get_logger().info(f"PERCENTAGE REACHED :{percentage}")
             # Trigger 
             if percentage >= 0.10: # 10% Free Threshold
-                self.get_logger().info(f"🔓 Zone free! (Seen {resolved_count}/{zone.total_count} voxels).")
+                # self.get_logger().info(f"🔓 Zone free! (Seen {resolved_count}/{zone.total_count} voxels).")
                 
                 # Use set.difference_update for bulk removal (molto più veloce)
                 self.ignored_targets.difference_update(zone.member_indices)
@@ -1283,22 +1298,7 @@ class MapLogicNode(Node):
         # --- 1. Spatial Hashing ---
         
         keys = np.floor(points / self.min_distance_rep).astype(int)
-        
-        # # We use a dictionary to keep only one point for each spatial key
-        # unique_obstacles = {}
-        
-        # # Iterate and fill the dictionary.
-        # for i in range(points.shape[0]):
-            
-        #     # The key is a tuple (k_x, k_y, k_z)
-        #     k = tuple(keys[i])
-            
-        #     # If this key is not represented then do it now
-        #     if k not in unique_obstacles:
-        #         unique_obstacles[k] = points[i]
-        
-        # # List of spatially distributed obstacles
-        # sparse_obstacles = list(unique_obstacles.values())
+
         _, unique_indices = np.unique(keys, axis=0, return_index=True)
 
         # List of spatially distributed obstacles
@@ -1350,6 +1350,7 @@ class MapLogicNode(Node):
     def get_frustum_aabb(self, T_world_cam):
         
         # --- 1. Define frustum lenght [Camera Frame]
+
         z_near = 0.07
         z_far = self.MAX_DEPTH
         
@@ -1358,6 +1359,7 @@ class MapLogicNode(Node):
 
         # Frustum box (Near plane + Far plane)
         corners_cam = [
+
             # Origin (useful approximation)
             [0, 0, 0], 
             # Near Plane
@@ -1370,10 +1372,13 @@ class MapLogicNode(Node):
             [ z_far * tan_h, -z_far * tan_v, z_far],
             [ z_far * tan_h,  z_far * tan_v, z_far],
             [-z_far * tan_h,  z_far * tan_v, z_far],
+
         ]
         corners_cam = np.array(corners_cam)
         
+
         # --- 2. Transform [World Frame]
+
         # Add column of 1s for homogeneous coordinates
         ones = np.ones((corners_cam.shape[0], 1))
         corners_cam_h = np.hstack([corners_cam, ones])
@@ -1425,26 +1430,68 @@ class MapLogicNode(Node):
     # --- Visualization Functions ---
     # ============================================================================================================================================
 
+    """
+    The following two functions are just used to print once in a topic the configuration of the parameters for
+    this node.
+    """
+    def publish_config_once(self):
+        self.publish_experiment_config()
+        self.timer_config.cancel()
+
     def publish_experiment_config(self):
         msg = VmcMapConfig()
         msg.header.stamp = self.get_clock().now().to_msg()
-        
-        msg.workspace_bounds_x = [float(self.WS_BOUNDS['x'][0]), float(self.WS_BOUNDS['x'][1])]
-        msg.workspace_bounds_y = [float(self.WS_BOUNDS['y'][0]), float(self.WS_BOUNDS['y'][1])]
-        msg.workspace_bounds_z = [float(self.WS_BOUNDS['z'][0]), float(self.WS_BOUNDS['z'][1])]
-        
-        msg.voxel_size = float(self.TARGET_VOXEL_SIZE)
-        msg.hit_increment = float(self.HIT_INC)
-        msg.miss_decrement = float(self.MISS_DEC)
-        msg.val_occupied_thresh = int(self.VAL_OCCUPIED)
-        msg.val_free_thresh = int(self.VAL_FREE)
+        msg.header.frame_id = "fr3_link0"
 
+        # Workspace Configuration
+        msg.type_experiment = self.type_experiment
+        msg.ws_x_min = float(self.WS_BOUNDS['x'][0])
+        msg.ws_x_max = float(self.WS_BOUNDS['x'][1])
+        msg.ws_y_min = float(self.WS_BOUNDS['y'][0])
+        msg.ws_y_max = float(self.WS_BOUNDS['y'][1])
+        msg.ws_z_min = float(self.WS_BOUNDS['z'][0])
+        msg.ws_z_max = float(self.WS_BOUNDS['z'][1])
+        msg.target_voxel_size = float(self.TARGET_VOXEL_SIZE)
+        msg.n_voxels_x = int(self.N_VOXELS_X)
+        msg.n_voxels_y = int(self.N_VOXELS_Y)
+        msg.n_voxels_z = int(self.N_VOXELS_Z)
+
+        # Probabilistic Configuration
+        msg.val_min = int(self.VAL_MIN)
+        msg.val_max = int(self.VAL_MAX)
+        msg.val_unknown = int(self.VAL_UNKNOWN)
+        msg.val_occupied = int(self.VAL_OCCUPIED)
+        msg.val_free = int(self.VAL_FREE)
+        msg.val_lock = int(self.VAL_LOCK)
+        msg.hit_inc = int(self.HIT_INC)
+        msg.miss_dec = int(self.MISS_DEC)
+
+        # Camera Configuration
+        msg.fov_h = float(self.FOV_H)
+        msg.fov_v = float(self.FOV_V)
+        msg.max_depth = float(self.MAX_DEPTH)
+        msg.min_depth = float(self.MIN_DEPTH)
+
+        # Logic & Scores
+        msg.max_obstacles = int(self.MAX_OBSTACLES)
+        msg.min_distance_rep = float(self.min_distance_rep)
+        msg.min_points_per_voxel = int(self.min_points_per_voxel)
+        msg.score_frontality = float(self.SCORE_FRONTALITY)
         msg.score_relevance = float(self.SCORE_RELEVANCE)
         msg.score_distance = float(self.SCORE_DISTANCE)
-        msg.score_frontality = float(self.SCORE_FRONTALITY)
-        
+
+        # Deadlock Configuration
+        msg.deadlock_vel_eps = float(self.DEADLOCK_VEL_EPS)
+        msg.deadlock_torque_eps = float(self.DEADLOCK_TORQUE_EPS)
+        msg.deadlock_time_threshold = float(self.DEADLOCK_TIME_THRESHOLD)
+        msg.deadlock_zone_radius = float(self.DEADLOCK_ZONE_RADIUS)
+        msg.deadlock_min_dist = float(self.DEADLOCK_MIN_DIST)
+        msg.recovery_min_dist = float(self.RECOVERY_MIN_DIST)
+        msg.recovery_max_dist = float(self.RECOVERY_MAX_DIST)
+
         self.pub_log_config.publish(msg)
-        self.get_logger().info("💾 Configurazione Log pubblicata.")
+        self.get_logger().info(f"💾 Full Configuration for '{self.type_experiment}' published.")
+        self.get_logger().info(f"F: {self.SCORE_FRONTALITY}, D: {self.SCORE_DISTANCE}, R: {self.SCORE_RELEVANCE}")
 
 
     """ 
@@ -1692,36 +1739,7 @@ class MapLogicNode(Node):
         explored_count = free_count + occupied_count
         percentage = (explored_count / total_voxels) * 100.0
 
-        # --- 2. Creation Text Marker ---
-        
-        marker = Marker()
-        marker.header.frame_id = "fr3_link0"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "status_text"
-        marker.id = 0
-        marker.type = Marker.TEXT_VIEW_FACING
-        marker.action = Marker.ADD
-
-        x_max = self.WS_BOUNDS['x'][1]
-        y_center = (self.WS_BOUNDS['y'][0] + self.WS_BOUNDS['y'][1]) / 2.0
-        z_min = self.WS_BOUNDS['z'][0]
-
-        marker.pose.position.x = x_max + 0.1
-        marker.pose.position.y = y_center
-        marker.pose.position.z = z_min 
-        
-        marker.pose.orientation.w = 1.0
-        marker.scale.z = 0.05
-        marker.scale.x = 0.15
-        marker.scale.y = 0.0
-        marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
-        marker.text = f"Found {explored_count} / {total_voxels} Voxels"
-        
-        if percentage >= self.MINIMUM_EXPLORED_PERCENTAGE:
-            self.get_logger().info("Reached 95%", " of the exploration at t: %s", self.get_clock().now().to_string)
-            self.pub_completion_time.publish(self.get_clock().now().to_msg())
-
-        self.pub_status_text.publish(marker)
+        self.get_logger().info(f"📈 Exploration Progress: {percentage:.2f}%", throttle_duration_sec=2.0)
         
         # --- 2. Publish Statistics Topic ---
         msg_stats = VmcMapStats()
@@ -1732,6 +1750,7 @@ class MapLogicNode(Node):
         msg_stats.unknown_voxels = unknown_count
         msg_stats.free_voxels = free_count
         msg_stats.occupied_voxels = occupied_count
+        msg_stats.percentage = percentage
         
         self.pub_map_stats.publish(msg_stats)
 

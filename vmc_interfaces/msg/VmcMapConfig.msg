@@ -1,3 +1,5 @@
+# Log message with all the map node parameters
+
 std_msgs/Header header
 
 # Workspace Configuration

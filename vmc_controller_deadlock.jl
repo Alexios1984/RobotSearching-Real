@@ -1,8 +1,24 @@
-# ======================================
-# --- Initial Setup ---
-# ======================================
+# =================================================================================================================
+# PROJECT: VMC Autonomous Exploration and Mapping
+# FILE: vmc_controller_deadlock.jl
+#
+# AUTHOR: Alessio Canzolino
+# DATE: February 2026
+#
+# DESCRIPTION:
+#
+#   This julia script contain the code for the motion node for the ROS2 environment. 
+#   A Virtual Model System (VMS) is built to control the Franka Emika FR3 robotic manipulator. 
+#   The model of the robot is implemented with additional collision points on its body to allow a safe exploration.
+#   The scripts takes the target and repulsors position data from two different channels and use them to insert the
+#   robot in the VMS and make it interact with it through a Virtual Model Control (VMC). 
+#   Torques are computed to make the robot moving according to the target and obstacles and then passe to the
+#   robot controller that applies them.   
+#
+#     [This is the official version for the experiments]
+#
+# =================================================================================================================
 
-# --- Julia Imports ---
 
 using PythonCall
 using StaticArrays
@@ -119,9 +135,9 @@ const FLOOR_Z_LEVEL = 0.01          # Height at which the floor is supposed to b
 
 # --- Shared Channels for Communication ---
 
-state_channel = Channel{Vector{Float64}}(1)         # Buffer for joint states
+state_channel = Channel{Vector{Float64}}(1)     # Buffer for joint states
 target_channel = Channel{Any}(2)                # Buffer for target 
-obstacles_channel = Channel{Any}(2)     # Buffer for obstacles
+obstacles_channel = Channel{Any}(2)             # Buffer for obstacles
 
 
 # ======================================
@@ -143,7 +159,7 @@ add_gravity_compensation!(robot, VMRobotControl.DEFAULT_GRAVITY)
 
 vms = VirtualMechanismSystem("franka_impedance_control", robot)
 
-offset = 0.5
+offset = 0.4
 stiffness_limits = 20.0
 
 upper_L = Float64[]
@@ -174,8 +190,7 @@ add_joint!(robot, Rigid(CAMERA_OFFSET); parent="fr3_hand_tcp", child="camera_fra
 add_coordinate!(robot, FrameOrigin("camera_frame"); id="camera_position")                                       # Camera Position Coordinate
 add_coordinate!(robot, FramePoint("camera_frame", SVector(0.0, 0.0, DIST_NOSE)); id="camera_nose")              # Camera Nose Coordinate
 
-add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.0, 0.4, 0.4))); id="target_attractor")                        # Target Attractor Coordinate (Front to Workspace)
-# add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_attractor")                        # Target Attractor Coordinate (Front to PC)
+add_coordinate!(vms, ReferenceCoord(Ref(SVector(0.4, 0.0, 0.4))); id="target_attractor")                        # Target Attractor Coordinate (Front to PC)
 
 
 # --- Attraction to Target ---
@@ -184,7 +199,7 @@ add_coordinate!(vms, CoordDifference("target_attractor", ".robot.camera_nose"); 
 
 CAM_TO_TARG_STIFF = 250.0
 CAM_TO_TARG_MAXFORCE = 25.0
-CAM_TO_TARG_DAMPING = 10.0
+CAM_TO_TARG_DAMPING = 9.0
 add_component!(vms, TanhSpring("cam_to_target_error"; max_force=CAM_TO_TARG_MAXFORCE, stiffness=CAM_TO_TARG_STIFF); id="attraction_spring")
 add_component!(vms, LinearDamper(CAM_TO_TARG_DAMPING * identity(3), "cam_to_target_error"); id="attraction_damper")
 
@@ -263,6 +278,7 @@ function f_setup(cache)
     # IDs for coordinate updates
     target_id = get_compiled_coordID(cache, "target_attractor")
     repulsor_ids = [get_compiled_coordID(cache, "active_repulsor_$i") for i in 1:N_REPULSORS]
+    nose_id = get_compiled_coordID(cache, ".robot.camera_nose")
 
     # Frame ID for Telemetry (to send pose to Python)
     cam_frame_id = get_compiled_frameID(cache, ".robot.camera_frame")
@@ -288,6 +304,11 @@ function f_setup(cache)
     floor_repulsors_handle = [cache[get_compiled_coordID(cache, fl_rep_id)].coord_data.val for fl_rep_id in floor_repulsor_ids]
 
     joint_ids = [get_compiled_coordID(cache, ".robot.JointValue$i") for i in 1:7]
+
+
+    # Move the target to the initial position of the robot to avoid fast initial movements
+    cache[target_id].coord_data.val[] = configuration(cache, nose_id) 
+
 
     return (target_id, repulsor_ids, cam_frame_id, link_coords_ids, floor_repulsors_handle, joint_ids)
 end
@@ -414,15 +435,15 @@ function ros_vm_controller(
         deadlock_pub = node.create_publisher(Float64MultiArray, "/vmc/deadlock_data", 10)
         
         # Log Config Publisher
-        pub_log_config = node.create_publisher(VmcControlConfig, "/vmc/log/config", 1)
+        pub_log_config = node.create_publisher(VmcControlConfig, "/vmc/log/config_vmc", 1)
 
         publish_control_config(node, pub_log_config)
 
         # Telemetry Publisher
-        telemetry_pub = node.create_publisher(VmcTelemetry, "/vmc/telemetry", 10)
+        telemetry_pub = node.create_publisher(VmcTelemetry, "/vmc/log/telemetry", 10)
 
         # Link Poses Publisher
-        poses_pub = node.create_publisher(VmcLinkPoses, "/vmc/link_poses", 10)
+        poses_pub = node.create_publisher(VmcLinkPoses, "/vmc/log/link_poses", 10)
 
         println("DEBUG [1.1]: Publishers created.")
         
@@ -512,13 +533,15 @@ function ros_vm_controller(
             end
         end
 
+        config_sent = false
+        startup_time = time()
 
         # --- Control Function ---
         
         control_func! = let control_cache=control_cache, args=args, node=node, 
                             torque_publisher=torque_publisher, state_publisher=state_publisher, deadlock_pub=deadlock_pub, telemetry_pub=telemetry_pub,
                             valid_link_names=valid_link_names, poses_pub=poses_pub, 
-                            cam_frame_id=cam_frame_id, link_coords_ids=link_coords_ids
+                            cam_frame_id=cam_frame_id, link_coords_ids=link_coords_ids, config_sent=config_sent, startup_time=startup_time
             
             function control_func!(t, dt)
 
@@ -785,9 +808,21 @@ function ros_vm_controller(
                     msg_poses.link_positions = pylist(py_points)
                     
                     poses_pub.publish(msg_poses)
+
+                    
+
                     
                 catch e
                     println("⚠️ Error publishing link poses: $e")
+                end
+
+                # ========================
+                # --- Publish Link Poses ---
+                # ========================
+                if !config_sent && (time() - startup_time > 2.0)
+                    publish_control_config(node, pub_log_config)
+                    println("💾 VMC Configuration Published (Delayed for Rosbag).")
+                    config_sent = true
                 end
 
                 return false

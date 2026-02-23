@@ -1,14 +1,35 @@
+# =================================================================================================================
+# PROJECT: VMC Autonomous Exploration and Mapping
+# FILE: vision_node_pcl.py
+#
+# AUTHOR: Alessio Canzolino
+# DATE: February 2026
+#
+# DESCRIPTION:
+#
+#   This python script contain the code for the vision node for the ROS2 environment. 
+#   An Intel Realsense D405 depth camera is used to capture the image and the depth of the spcae around the robot 
+#   during its navigation int eh workspace. 
+#   This node is responsible of getting the image and depth data from the camera and compute the associated pointcloud.
+#
+#     [This is the official version for the experiments]
+#
+# =================================================================================================================
+
+
 import rclpy
 from rclpy.node import Node
 import numpy as np
 import cv2
 from cv_bridge import CvBridge
 import time
+import json
+
 
 # ROS 2 Messages
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
-from std_msgs.msg import Header, Int32
+from std_msgs.msg import Header, Int32, String
 
 class DepthVisionNode(Node):
     
@@ -28,7 +49,7 @@ class DepthVisionNode(Node):
         self.min_dist = 0.07            # Minimum distance to consider for detected obstacles (minimum distance Realsense)
         self.max_dist = 0.50            # Maximum distance to consider for detected obstacles (maximum distances Realsense)
         self.depth_scale = 0.001        # RealSense default (mm -> m)
-        self.decimation = 20             # Skip factor for trivially downsampling the depth image
+        self.decimation = 10            # Skip factor for trivially downsampling the depth image
         self.camera_info = None
 
         # ==========================
@@ -51,6 +72,7 @@ class DepthVisionNode(Node):
             10
         )
         
+        
         # -- Publishers --
         
         self.pub_pcl = self.create_publisher(           # Publisher of the Pointcloud
@@ -59,13 +81,20 @@ class DepthVisionNode(Node):
             10
         )
         
-        self.pub_count = self.create_publisher(
+        self.pub_count = self.create_publisher(         # Publisher to get the total number of output points of the pointcloud
             Int32,
             '/vision/point_count',
             10
         )
 
-        # Logging
+        self.pub_config = self.create_publisher(        # Log publisher for the parameter configuration for the node 
+            String, 
+            '/vision/node_config', 
+            10
+        )
+        # Log Timer
+        self.timer_config = self.create_timer(2.0, self.publish_config_once) 
+
         self.get_logger().info(f"Depth Node Ready! Range: {self.min_dist}-{self.max_dist}m")
 
 
@@ -135,6 +164,31 @@ class DepthVisionNode(Node):
 
         # Publish the count of the points sent
         self.pub_count.publish(Int32(data=points_3d.shape[0])) 
+
+
+    """
+    The following two functions are just used to print once in a topic the configuration of the parameters for
+    this node.
+    """
+    def publish_config_once(self):
+        self.publish_experiment_config()
+        self.timer_config.cancel()
+
+    def publish_experiment_config(self):
+        
+        config_data = {
+            "min_dist_m": self.min_dist,
+            "max_dist_m": self.max_dist,
+            "decimation_factor": self.decimation,
+            "depth_scale": self.depth_scale,
+            "node_name": self.get_name()
+        }
+        
+        msg = String()
+        msg.data = json.dumps(config_data)
+        self.pub_config.publish(msg)
+        self.get_logger().info(f"Config published to /vision/node_config: {msg.data}")
+        return
 
 def main(args=None):
     rclpy.init(args=args)

@@ -1,3 +1,23 @@
+# =================================================================================================================
+# PROJECT: VMC Autonomous Exploration and Mapping
+# FILE: map_pcl.py
+#
+# AUTHOR: Alessio Canzolino
+# DATE: February 2026
+#
+# DESCRIPTION:
+#
+#   This python script contain the code for the mapping node for the ROS2 environment. 
+#   Its node acts like as the core of the system, transforming raw, noisy pointclouds from the depth camera into a 
+#   consistent global coordinate frame. It incrementally updates the 3D environment representation by applying an algorithm
+#   that distinguished between occuied, free and unknown space while properly handling visual occlusions.
+#   At the same time, some nodes functions compute the position for each repulsor on the occupied zones to avoid collisions
+#   and the best target to check. This data are broadcasted to a julia script containing the VMC that controls the robot 
+#   to make it navigate into the workspace without hitting the obstacles
+#
+# =================================================================================================================
+
+
 import rclpy
 from rclpy.node import Node
 import numpy as np
@@ -299,8 +319,10 @@ class MapLogicNode(Node):
             # --- Discovery Rate Check ---
             # --------------------------------------
             
+            # Time to check the discovery rate
             dt_check = time.time() - self.last_discovery_check_time
             
+            # If it's time, compute the seen percentage in this time and if below the treshold then trigger the deadlock
             if dt_check > self.DISCOVERY_CHECK_INTERVAL:
                 
                 mask_unknown = (self.grid > self.VAL_FREE) & (self.grid < self.VAL_OCCUPIED)
@@ -315,13 +337,14 @@ class MapLogicNode(Node):
                     if discovery_rate < self.MIN_DISCOVERY_RATE:
                         self.is_deadlocked = True
                 
-                # 5. Aggiorna lo stato per il prossimo giro
+                # Update the state for next
                 self.last_discovery_check_time = time.time()
                 self.unknown_count_last_check = current_unknown_count
             
             # --------------------------------------
             # --- Deadlock Management ---
             # --------------------------------------
+            
             
             if self.is_deadlocked:
                 
@@ -826,7 +849,6 @@ class MapLogicNode(Node):
     """
     def publish_obstacles_worker(self):
         
-        # 1. Ottieni gli ostacoli ottimizzati (Spatial Hashing + Sorting)
         optimized_obstacles = self.get_downsampled_obstacles()
         
         msg = VmcObstacles()
